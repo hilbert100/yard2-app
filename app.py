@@ -5,7 +5,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import CellNotFound, WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 # ---------------------------------------------------------
@@ -125,11 +125,10 @@ class SteelYardSheetDB:
 
     def _find_item_row(self, part_no):
         """품번으로 Items 시트에서 실제 행 번호(헤더 포함, 1-based)를 찾음. 없으면 None."""
-        try:
-            cell = self.ws_items.find(part_no, in_column=ITEMS_COL["품번"])
-            return cell.row
-        except CellNotFound:
+        cell = self.ws_items.find(part_no, in_column=ITEMS_COL["품번"])
+        if cell is None:
             return None
+        return cell.row
 
     # ---------------- 1단계: 입고 -> 재고현황(IN_STOCK) ----------------
     def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks):
