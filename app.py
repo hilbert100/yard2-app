@@ -1,4 +1,5 @@
 import io
+import re
 from datetime import datetime
 
 import gspread
@@ -24,10 +25,10 @@ st.set_page_config(
 #    재고현황(IN_STOCK) / 출고예정내역(PENDING_DISPATCH) / 출고내역(DISPATCHED)
 #    화면에 나눠서 보여줍니다. 품번은 전체 시스템에서 영구히 유일합니다.
 # ---------------------------------------------------------
-ITEMS_HEADERS = ["품번", "종류", "규격", "위치", "상태", "입고일", "출고일", "배송지", "특이사항"]
+ITEMS_HEADERS = ["품번", "종류", "규격", "위치", "상태", "입고일", "출고일", "배송지", "특기사항"]
 ITEMS_COL = {name: i + 1 for i, name in enumerate(ITEMS_HEADERS)}  # 1-based 열 번호
 
-LOG_HEADERS = ["품번", "종류", "규격", "위치", "입고일", "출고일", "배송지", "특이사항", "기록시각"]
+LOG_HEADERS = ["품번", "종류", "규격", "위치", "입고일", "출고일", "배송지", "특기사항", "기록시각"]
 CATEGORIES_HEADERS = ["종류"]
 DESTINATIONS_HEADERS = ["배송지"]
 
@@ -40,8 +41,48 @@ STATUS_LABEL = {
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-def format_location_code(zone, row, col):
-    return f"{str(zone).strip().upper()}-{int(row):02d}-{int(col):02d}"
+LEVEL_ALIASES = {"상": "상", "상단": "상", "위": "상", "top": "상", "하": "하", "하단": "하", "아래": "하", "bottom": "하"}
+
+
+def normalize_part_no(raw):
+    """품번 맨 앞의 고정 접두사 'F'를 자동으로 붙여준다.
+    이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')"""
+    s = (raw or "").strip().upper()
+    if not s:
+        return s
+    if not s.startswith("F"):
+        s = "F" + s
+    return s
+
+
+def format_location_code(zone, row, col, level=""):
+    """level이 비어있으면 기존과 동일하게 'A-01-01' (대부분의 1단 적재).
+    상/하를 지정하면 'A-01-01-상' 처럼 뒤에 층 구분이 붙는다(2단 적재용)."""
+    base = f"{str(zone).strip().upper()}-{int(row):02d}-{int(col):02d}"
+    level_clean = LEVEL_ALIASES.get(str(level).strip().lower()) if level else ""
+    # 위 딕셔너리는 소문자 top/bottom만 lower() 매칭되므로 한글은 원문 그대로도 시도
+    if not level_clean and level:
+        level_clean = LEVEL_ALIASES.get(str(level).strip(), "")
+    return f"{base}-{level_clean}" if level_clean else base
+
+
+LOCATION_INPUT_RE = re.compile(
+    r"^\s*([A-Za-z가-힣]+)\s*[-,/\s]+\s*(\d+)\s*[-,/\s]+\s*(\d+)"
+    r"(?:\s*[-,/\s]+\s*(상단|하단|상|하|위|아래|top|bottom))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_location_input(raw):
+    """'A-01-01' 처럼 정확한 형식이 아니어도, 구역/열/행(+선택적으로 상/하 층)을
+    공백·쉼표·슬래시·하이픈 아무 구분자로나 입력하면 자동 변환. 파싱 실패 시 None."""
+    if not raw:
+        return None
+    m = LOCATION_INPUT_RE.match(str(raw))
+    if not m:
+        return None
+    zone, row, col, level = m.groups()
+    return format_location_code(zone, row, col, level or "")
 
 
 # ---------------------------------------------------------
@@ -184,9 +225,12 @@ class SteelYardSheetDB:
         return cell.row
 
     # ---------------- 1단계: 입고 -> 재고현황(IN_STOCK) ----------------
-    def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks):
-        clean_part_no = part_no.strip().upper()
-        loc_code = format_location_code(zone, row, col)
+    def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks, level=""):
+        clean_part_no = normalize_part_no(part_no)
+        loc_code = format_location_code(zone, row, col, level)
+
+        if category_name not in self.get_categories():
+            raise ValueError(f"[{category_name}] 는 등록되지 않은 종류입니다. Master 관리에서 먼저 추가해주세요.")
 
         # 품번은 영구 고유번호 -> 상태 불문하고 이미 존재하면 거부
         existing_row = self._find_item_row(clean_part_no)
@@ -200,7 +244,7 @@ class SteelYardSheetDB:
         df = self._items_df()
         active = df[df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])] if not df.empty else df
         if not active.empty and (active["위치"] == loc_code).any():
-            raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다 (1단 적재만 허용).")
+            raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다. (2단 적재라면 상/하를 다르게 지정해주세요)")
 
         clean_spec = spec.strip().upper() if spec else ""
         self.ws_items.append_row([
@@ -210,9 +254,9 @@ class SteelYardSheetDB:
         _bump_cache_version()
 
     # ---------------- 적재위치 변경 ----------------
-    def update_location(self, part_no, new_zone, new_row, new_col):
-        clean_part_no = part_no.strip().upper()
-        new_loc_code = format_location_code(new_zone, new_row, new_col)
+    def update_location(self, part_no, new_zone, new_row, new_col, level=""):
+        clean_part_no = normalize_part_no(part_no)
+        new_loc_code = format_location_code(new_zone, new_row, new_col, level)
 
         row_idx = self._find_item_row(clean_part_no)
         if not row_idx:
@@ -236,7 +280,7 @@ class SteelYardSheetDB:
 
     # ---------------- 3단계: 출고확정 -> 출고내역(DISPATCHED) ----------------
     def confirm_outbound(self, part_no, outbound_date, dest_name, remarks):
-        clean_part_no = part_no.strip().upper()
+        clean_part_no = normalize_part_no(part_no)
         row_idx = self._find_item_row(clean_part_no)
         if not row_idx:
             raise ValueError("존재하지 않는 품번입니다.")
@@ -244,14 +288,14 @@ class SteelYardSheetDB:
         row_vals = self.ws_items.row_values(row_idx)
         row_vals += [""] * (len(ITEMS_HEADERS) - len(row_vals))
 
-        existing_remarks = row_vals[ITEMS_COL["특이사항"] - 1]
+        existing_remarks = row_vals[ITEMS_COL["특기사항"] - 1]
         final_remarks = existing_remarks
         if remarks:
             final_remarks = f"{existing_remarks} / [출고비고] {remarks}" if existing_remarks else remarks
 
         inbound_date_val = row_vals[ITEMS_COL["입고일"] - 1]
 
-        # 상태(E) ~ 특이사항(I)까지 한 번에 갱신 (API 호출 최소화)
+        # 상태(E) ~ 특기사항(I)까지 한 번에 갱신 (API 호출 최소화)
         self.ws_items.update(
             f"E{row_idx}:I{row_idx}",
             [["DISPATCHED", inbound_date_val, str(outbound_date), dest_name, final_remarks]]
@@ -283,12 +327,12 @@ class SteelYardSheetDB:
 
     # ---------------- 재고현황 표에서 셀 직접 수정 ----------------
     def update_item(self, original_part_no, new_part_no, category_name, spec, location_code, remarks):
-        """재고현황 표에서 종류/품번/규격/위치/특이사항을 한 번에 수정."""
+        """재고현황 표에서 종류/품번/규격/위치/특기사항을 한 번에 수정."""
         row_idx = self._find_item_row(original_part_no)
         if not row_idx:
             raise ValueError(f"[{original_part_no}] 품번을 찾을 수 없습니다.")
 
-        new_part_no_clean = (new_part_no or "").strip().upper()
+        new_part_no_clean = normalize_part_no(new_part_no)
         if not new_part_no_clean:
             raise ValueError("품번은 비워둘 수 없습니다.")
 
@@ -297,9 +341,16 @@ class SteelYardSheetDB:
             if existing_row:
                 raise ValueError(f"[{new_part_no_clean}] 품번은 이미 다른 곳에서 사용 중입니다.")
 
-        loc_code = (location_code or "").strip().upper()
-        if not loc_code:
+        raw_loc = (location_code or "").strip()
+        if not raw_loc:
             raise ValueError("위치는 비워둘 수 없습니다.")
+
+        loc_code = normalize_location_input(raw_loc)
+        if loc_code is None:
+            raise ValueError(
+                f"위치 형식을 알아볼 수 없습니다: '{raw_loc}'. "
+                "구역과 열, 행을 순서대로 입력해주세요 (예: A 1 1, A-1-1, A,1,1)."
+            )
 
         df = self._items_df()
         active = df[
@@ -311,18 +362,18 @@ class SteelYardSheetDB:
         clean_spec = (spec or "").strip().upper()
         clean_remarks = remarks or ""
 
-        # 품번(A)~위치(D), 특이사항(I) 갱신
+        # 품번(A)~위치(D), 특기사항(I) 갱신
         self.ws_items.update(
             f"A{row_idx}:D{row_idx}",
             [[new_part_no_clean, category_name, clean_spec, loc_code]],
         )
-        self.ws_items.update_cell(row_idx, ITEMS_COL["특이사항"], clean_remarks)
+        self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], clean_remarks)
         _bump_cache_version()
 
     # ---------------- 조회 ----------------
     def search_current_stock(self, category_name="전체", part_kw="", spec_kw=""):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특이사항"]
+        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항"]
         if df.empty:
             return pd.DataFrame(columns=cols)
 
@@ -341,7 +392,7 @@ class SteelYardSheetDB:
 
     def search_pending_dispatch(self):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특이사항"]
+        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항"]
         if df.empty:
             return pd.DataFrame(columns=cols)
         df = df[df["상태"] == "PENDING_DISPATCH"].copy().rename(columns={"위치": "적재위치"})
@@ -351,10 +402,10 @@ class SteelYardSheetDB:
 
     def search_dispatched(self):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "출고일", "배송지", "특이사항"]
+        cols = ["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항"]
         if df.empty:
             return pd.DataFrame(columns=cols)
-        df = df[df["상태"] == "DISPATCHED"].copy().rename(columns={"위치": "적재위치"})
+        df = df[df["상태"] == "DISPATCHED"].copy()
         if df.empty:
             return pd.DataFrame(columns=cols)
         return df[cols].sort_values(["출고일", "품번"], ascending=[False, True]).reset_index(drop=True)
@@ -364,12 +415,12 @@ class SteelYardSheetDB:
 # 엑셀 다운로드 생성기
 # ---------------------------------------------------------
 def render_html_table(df, checkbox_col=None):
-    """조회 전용 화면(일반 작업자)에서 쓰는, 목업과 같은 스타일의 컴팩트한 표."""
+    """조회 전용 화면(이용자)에서 쓰는, 목업과 같은 스타일의 컴팩트한 표."""
     if df.empty:
         return
     cols = [c for c in df.columns if c != checkbox_col]
     header_html = "".join(
-        f'<th style="text-align:left;padding:5px 8px;color:var(--text-muted);'
+        f'<th style="text-align:center;padding:5px 8px;color:var(--text-muted);'
         f'border-bottom:0.5px solid var(--border);white-space:nowrap;">{c}</th>'
         for c in cols
     )
@@ -377,7 +428,7 @@ def render_html_table(df, checkbox_col=None):
     for _, row in df.iterrows():
         cells = "".join(
             f'<td style="padding:6px 8px;border-bottom:0.5px solid var(--border);'
-            f'white-space:nowrap;">{row[c] if str(row[c]).strip() else "-"}</td>'
+            f'white-space:nowrap;text-align:center;">{row[c] if str(row[c]).strip() else "-"}</td>'
             for c in cols
         )
         rows_html += f"<tr>{cells}</tr>"
@@ -452,7 +503,7 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# 모바일에서 종류/품번/규격/위치/입고일/특이사항/체크박스가
+# 모바일에서 종류/품번/규격/위치/입고일/특기사항/체크박스가
 # 가로 스크롤 없이 최대한 한 화면에 들어오도록 표 폰트와 셀 여백을 압축
 st.markdown("""
 <style>
@@ -464,6 +515,8 @@ st.markdown("""
     padding-left: 4px !important;
     padding-right: 4px !important;
     font-size: 12px !important;
+    justify-content: center !important;
+    text-align: center !important;
 }
 [data-testid="stDataFrame"] div[role="columnheader"],
 [data-testid="stDataEditor"] div[role="columnheader"] {
@@ -471,6 +524,13 @@ st.markdown("""
     padding-right: 4px !important;
     font-size: 12px !important;
     font-weight: 600;
+    justify-content: center !important;
+    text-align: center !important;
+}
+[data-testid="stDataFrame"] div[role="columnheader"] > div,
+[data-testid="stDataEditor"] div[role="columnheader"] > div {
+    justify-content: center !important;
+    text-align: center !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -502,7 +562,7 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 c_role, c_pin = st.columns([2, 3])
-role_selection = c_role.radio("사용자 권한", ["일반 작업자 (조회만)", "관리자"], horizontal=True)
+role_selection = c_role.radio("사용자 권한", ["이용자 (조회만)", "관리자"], horizontal=True)
 
 if role_selection == "관리자":
     if not st.session_state.is_admin:
@@ -546,28 +606,29 @@ with tab_in:
                     cat_name = st.selectbox("종류", categories)
 
                 with col_part:
-                    st.markdown("**품번 (4단 분할)**")
+                    st.markdown("**품번 (4단 분할, 맨 앞 F는 자동으로 붙습니다)**")
                     p1, p2, p3, p4 = st.columns(4)
-                    part_1 = p1.text_input("1단", placeholder="FA", label_visibility="collapsed")
-                    part_2 = p2.text_input("2단", placeholder="3B", label_visibility="collapsed")
-                    part_3 = p3.text_input("3단", placeholder="01", label_visibility="collapsed")
-                    part_4 = p4.text_input("4단", placeholder="02", label_visibility="collapsed")
+                    part_1 = p1.text_input("1단", placeholder="B2", label_visibility="collapsed")
+                    part_2 = p2.text_input("2단", placeholder="2B", label_visibility="collapsed")
+                    part_3 = p3.text_input("3단", placeholder="004", label_visibility="collapsed")
+                    part_4 = p4.text_input("4단", placeholder="3", label_visibility="collapsed")
 
                 with col_spec:
                     spec = st.text_input("규격", placeholder="예: 12T x 1500 x 6000")
 
                 with col_loc:
-                    st.markdown("**적재위치 (1단 원칙)**")
-                    z_col, r_col, c_col = st.columns(3)
+                    st.markdown("**적재위치 (2단 적재 시 층 선택)**")
+                    z_col, r_col, c_col, lv_col = st.columns(4)
                     zone = z_col.text_input("구역", value="A", label_visibility="collapsed")
                     row_n = r_col.number_input("열", min_value=1, value=1, label_visibility="collapsed")
                     col_n = c_col.number_input("행", min_value=1, value=1, label_visibility="collapsed")
+                    level = lv_col.selectbox("층", ["", "상", "하"], label_visibility="collapsed")
 
                 with col_date:
                     in_date = st.date_input("입고일", datetime.now())
 
                 with col_rem:
-                    remarks = st.text_input("특이사항", placeholder="예: 측면 스크래치")
+                    remarks = st.text_input("특기사항", placeholder="예: 측면 스크래치")
 
                 st.divider()
 
@@ -578,11 +639,97 @@ with tab_in:
                     else:
                         full_part_no = "-".join(part_components).upper()
                         try:
-                            db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks)
-                            st.success(f"✅ [{full_part_no}] 입고 등록 완료! (위치: {zone.upper()}-{row_n:02d}-{col_n:02d})")
+                            db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks, level)
+                            saved_part_no = normalize_part_no(full_part_no)
+                            saved_loc = format_location_code(zone, row_n, col_n, level)
+                            st.success(f"✅ [{saved_part_no}] 입고 등록 완료! (위치: {saved_loc})")
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 등록 실패: {e}")
+
+        st.divider()
+        st.subheader("📤 엑셀 일괄 업로드")
+        st.caption(
+            "정해진 양식(종류 / 품번1~4단 / 규격 / 구역·열·행·층 / 입고일 / 특기사항)의 "
+            "엑셀 파일을 올리면 한 줄씩 자동으로 입고 등록합니다."
+        )
+
+        uploaded_file = st.file_uploader("엑셀 파일 선택 (.xlsx)", type=["xlsx"], key="bulk_upload")
+
+        if uploaded_file is not None:
+            try:
+                # dtype=str: '004' 같은 앞자리 0이 있는 품번/숫자 칸이 자동으로 숫자로
+                # 변환되어 0이 사라지는 것을 방지 (모든 칸을 텍스트 그대로 읽음)
+                upload_df = pd.read_excel(
+                    uploaded_file, sheet_name="입고데이터", header=0, engine="openpyxl", dtype=str
+                )
+            except Exception as e:
+                st.error(f"❌ 엑셀 파일을 읽을 수 없습니다: {e}. [입고데이터] 시트가 있는지 확인해주세요.")
+                upload_df = None
+
+            if upload_df is not None:
+                upload_df = upload_df.dropna(how="all")
+                st.write(f"총 {len(upload_df)}줄을 읽었습니다.")
+
+                if st.button("⚡ 일괄 업로드 실행", type="primary", use_container_width=True):
+                    results = []
+                    for i, row in upload_df.iterrows():
+                        excel_row_no = i + 3  # 헤더(1) + 예시(2) 다음부터 시작하는 실제 엑셀 행 번호
+
+                        def g(col):
+                            val = row.get(col)
+                            return "" if pd.isna(val) else str(val).strip()
+
+                        cat = g("종류")
+                        p1, p2, p3, p4 = g("품번1단"), g("품번2단"), g("품번3단"), g("품번4단")
+                        spec = g("규격")
+                        zone = g("구역")
+                        row_n_raw = g("열")
+                        col_n_raw = g("행")
+                        level = g("층(선택)")
+                        remarks = g("특기사항")
+
+                        part_components = [p for p in [p1, p2, p3, p4] if p]
+                        if not (cat and len(part_components) == 4 and zone and row_n_raw and col_n_raw):
+                            if cat or p1 or p2 or p3 or p4 or zone or row_n_raw or col_n_raw:
+                                results.append((excel_row_no, "-", "⚠️ 건너뜀", "필수 항목(종류/품번1~4단/구역/열/행) 중 비어있는 칸이 있습니다."))
+                            continue
+
+                        full_part_no = "-".join(part_components).upper()
+
+                        try:
+                            row_n = int(float(row_n_raw))
+                            col_n = int(float(col_n_raw))
+                        except ValueError:
+                            results.append((excel_row_no, full_part_no, "❌ 실패", f"열/행은 숫자여야 합니다 (입력값: {row_n_raw}, {col_n_raw})"))
+                            continue
+
+                        in_date_val = row.get("입고일")
+                        if pd.isna(in_date_val) or str(in_date_val).strip() == "":
+                            in_date = datetime.now().date()
+                        else:
+                            parsed = pd.to_datetime(in_date_val, errors="coerce")
+                            in_date = parsed.date() if not pd.isna(parsed) else datetime.now().date()
+
+                        try:
+                            db.register_inbound(full_part_no, cat, spec, zone, row_n, col_n, in_date, remarks, level)
+                            saved_part_no = normalize_part_no(full_part_no)
+                            results.append((excel_row_no, saved_part_no, "✅ 성공", ""))
+                        except Exception as e:
+                            results.append((excel_row_no, full_part_no, "❌ 실패", str(e)))
+
+                    success_count = sum(1 for r in results if r[2] == "✅ 성공")
+                    fail_count = sum(1 for r in results if r[2] == "❌ 실패")
+                    skip_count = sum(1 for r in results if r[2] == "⚠️ 건너뜀")
+
+                    st.success(f"✅ 성공 {success_count}건 · ❌ 실패 {fail_count}건 · ⚠️ 건너뜀 {skip_count}건")
+
+                    if results:
+                        result_df = pd.DataFrame(results, columns=["엑셀 행", "품번", "결과", "사유"])
+                        st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+                    if success_count:
+                        st.info("성공한 항목은 [실시간 재고현황] 탭에서 확인하실 수 있습니다.")
 
 # TAB 2: 실시간 재고현황
 with tab_stock:
@@ -613,21 +760,28 @@ with tab_stock:
         if is_admin:
             with st.expander("🔄 [니구리 작업] 적재위치 수시 변경 (클릭)", expanded=False):
                 with st.form("loc_update_form", clear_on_submit=True):
-                    u_col1, u_col2, u_col3, u_col4 = st.columns([2.5, 1, 1, 1])
+                    u_col1, u_col2, u_col3, u_col4, u_col5 = st.columns([2.2, 1, 1, 1, 1])
                     u_part = u_col1.selectbox("위치 변경 대상 품번", stock_df["품번"].tolist())
                     u_zone = u_col2.text_input("신규 구역", value="A")
                     u_row = u_col3.number_input("신규 열", min_value=1, value=1)
                     u_col = u_col4.number_input("신규 행", min_value=1, value=1)
+                    u_level = u_col5.selectbox("층", ["", "상", "하"])
                     if st.form_submit_button("⚡ 적재위치 변경 저장", use_container_width=True):
                         try:
-                            db.update_location(u_part, u_zone, u_row, u_col)
-                            st.success(f"✅ [{u_part}] 위치가 [{u_zone.upper()}-{u_row:02d}-{u_col:02d}](으)로 수정되었습니다!")
+                            db.update_location(u_part, u_zone, u_row, u_col, u_level)
+                            new_loc = format_location_code(u_zone, u_row, u_col, u_level)
+                            st.success(f"✅ [{u_part}] 위치가 [{new_loc}](으)로 수정되었습니다!")
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 위치 변경 실패: {e}")
 
             st.info(
-                "💡 **셀을 탭하면 종류·품번·규격·위치·특이사항을 바로 수정**할 수 있습니다. "
+                "💡 **셀을 탭하면 종류·품번·규격·위치·특기사항을 바로 수정**할 수 있습니다. "
+                "품번 맨 앞의 F는 안 쓰셔도 저장할 때 자동으로 붙습니다. "
+                "위치는 정확한 형식(A-01-01) 없이 구역·열·행을 순서대로 입력하시면 "
+                "자동으로 하이픈이 붙습니다 (예: `A 1 1`, `A,1,1`, `A-1-1` 모두 A-01-01로 저장됨). "
+                "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
+                "보통은 비워두시면 됩니다. "
                 "고치신 후 아래 [✏️ 변경사항 저장]을 눌러야 반영됩니다. "
                 "출고 예정으로 보낼 품번은 **[출고 선택]** 체크박스를 체크하세요."
             )
@@ -648,7 +802,7 @@ with tab_stock:
                     "규격": st.column_config.TextColumn("규격", width="small"),
                     "적재위치": st.column_config.TextColumn("위치", width="small"),
                     "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                    "특이사항": st.column_config.TextColumn("특이사항", width="small"),
+                    "특기사항": st.column_config.TextColumn("특기사항", width="small"),
                     "출고 선택": st.column_config.CheckboxColumn("출고", width="small", default=False),
                 },
                 key="editor_stock",
@@ -667,7 +821,7 @@ with tab_stock:
                             or orig["품번"] != new["품번"]
                             or orig["규격"] != new["규격"]
                             or orig["적재위치"] != new["적재위치"]
-                            or orig["특이사항"] != new["특이사항"]
+                            or orig["특기사항"] != new["특기사항"]
                         ):
                             changed_rows.append((orig, new))
 
@@ -684,7 +838,7 @@ with tab_stock:
                                     category_name=new["종류"],
                                     spec=new["규격"],
                                     location_code=new["적재위치"],
-                                    remarks=new["특이사항"],
+                                    remarks=new["특기사항"],
                                 )
                                 success_count += 1
                             except Exception as e:
@@ -711,17 +865,18 @@ with tab_stock:
     else:
         st.info("조건에 일치하는 재고가 없습니다.")
 
-# TAB 3: 출고예정내역 (관리자 전용)
+# TAB 3: 출고예정내역
 with tab_pending:
     st.subheader("🚚 출고예정내역")
 
-    if not is_admin:
-        st.warning("🔒 출고예정내역은 관리자 전용 화면입니다. 재고 조회는 [실시간 재고현황] 탭을, 완료된 출고 기록은 [출고내역] 탭을 이용해주세요.")
-    else:
-        pending_df = db.search_pending_dispatch()
-        st.metric("출고 대기 수량", f"{len(pending_df)}건")
+    pending_df = db.search_pending_dispatch()
+    st.metric("출고 대기 수량", f"{len(pending_df)}건")
 
-        if not pending_df.empty:
+    if not pending_df.empty:
+        if not is_admin:
+            render_html_table(pending_df)
+            st.info("💡 보류·확정 처리는 관리자 권한이 필요합니다.")
+        else:
             destinations = db.get_destinations()
             if not destinations:
                 st.error("등록된 배송지가 없습니다. Master 관리 탭에서 추가해 주세요.")
@@ -741,14 +896,14 @@ with tab_pending:
                     pending_df_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특이사항"],
+                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항"],
                     column_config={
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="small"),
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                        "특이사항": st.column_config.TextColumn("특이사항", width="small"),
+                        "특기사항": st.column_config.TextColumn("특기사항", width="small"),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                         "배송지": st.column_config.SelectboxColumn("배송지", width="small", options=destinations),
@@ -787,8 +942,8 @@ with tab_pending:
                             st.error(f"❌ {err}")
 
                         st.rerun()
-        else:
-            st.info("현재 출고 예정인 내역이 없습니다.")
+    else:
+        st.info("현재 출고 예정인 내역이 없습니다.")
 
 # TAB 4: 출고내역
 with tab_history:
@@ -798,11 +953,11 @@ with tab_history:
     st.metric("총 누적 출고 수량", f"{len(dispatched_df)}건")
 
     if not dispatched_df.empty:
-        excel_out_data = generate_excel_report(dispatched_df, title="출고완료내역")
+        excel_out_data = generate_excel_report(dispatched_df, title="출고내역")
         st.download_button(
             "📊 출고내역 엑셀 다운로드 (.xlsx)",
             data=excel_out_data,
-            file_name=f"출고완료내역_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"출고내역_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
