@@ -60,38 +60,68 @@ def get_spreadsheet():
     return client.open_by_key(st.secrets["sheet_id"])
 
 
+def _get_or_create_ws(ss, name, headers):
+    try:
+        ws = ss.worksheet(name)
+    except WorksheetNotFound:
+        ws = ss.add_worksheet(title=name, rows=1000, cols=len(headers) + 2)
+        ws.append_row(headers)
+        return ws
+    if ws.row_values(1) != headers:
+        ws.update("A1", [headers])
+    return ws
+
+
+@st.cache_resource
+def get_worksheets():
+    """탭(Items/Categories/Destinations/DispatchLog) 확보 + 기본값 시딩.
+    이 배포본에서 딱 한 번만 실행되어(모든 사용자/재실행이 공유) API 호출을 크게 아낍니다."""
+    ss = get_spreadsheet()
+    ws_items = _get_or_create_ws(ss, "Items", ITEMS_HEADERS)
+    ws_categories = _get_or_create_ws(ss, "Categories", CATEGORIES_HEADERS)
+    ws_destinations = _get_or_create_ws(ss, "Destinations", DESTINATIONS_HEADERS)
+    ws_log = _get_or_create_ws(ss, "DispatchLog", LOG_HEADERS)
+    if len(ws_categories.col_values(1)) <= 1:
+        ws_categories.append_rows([["열연강판"], ["냉연강판"], ["후판"]])
+    if len(ws_destinations.col_values(1)) <= 1:
+        ws_destinations.append_rows([["본사 공장"], ["A현장"], ["하청1"]])
+    return ws_items, ws_categories, ws_destinations, ws_log
+
+
+def _cache_version():
+    return st.session_state.get("_sheet_cache_version", 0)
+
+
+def _bump_cache_version():
+    """쓰기 작업 후 호출 — 캐시된 읽기 결과를 무효화해서 다음 조회에 최신값이 반영되게 함."""
+    st.session_state["_sheet_cache_version"] = _cache_version() + 1
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_all_records(sheet_name, _version):
+    ss = get_spreadsheet()
+    ws = ss.worksheet(sheet_name)
+    return ws.get_all_records()
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_col_values(sheet_name, col, _version):
+    ss = get_spreadsheet()
+    ws = ss.worksheet(sheet_name)
+    return ws.col_values(col)
+
+
 # ---------------------------------------------------------
 # 3. 구글 시트 DB 엔진
 # ---------------------------------------------------------
 class SteelYardSheetDB:
     def __init__(self):
-        self.ss = get_spreadsheet()
-        self.ws_items = self._get_or_create_ws("Items", ITEMS_HEADERS)
-        self.ws_categories = self._get_or_create_ws("Categories", CATEGORIES_HEADERS)
-        self.ws_destinations = self._get_or_create_ws("Destinations", DESTINATIONS_HEADERS)
-        self.ws_log = self._get_or_create_ws("DispatchLog", LOG_HEADERS)
-        self._seed_defaults()
+        self.ws_items, self.ws_categories, self.ws_destinations, self.ws_log = get_worksheets()
 
-    def _get_or_create_ws(self, name, headers):
-        try:
-            ws = self.ss.worksheet(name)
-        except WorksheetNotFound:
-            ws = self.ss.add_worksheet(title=name, rows=1000, cols=len(headers) + 2)
-            ws.append_row(headers)
-            return ws
-        if ws.row_values(1) != headers:
-            ws.update("A1", [headers])
-        return ws
-
-    def _seed_defaults(self):
-        if len(self.ws_categories.col_values(1)) <= 1:
-            self.ws_categories.append_rows([["열연강판"], ["냉연강판"], ["후판"]])
-        if len(self.ws_destinations.col_values(1)) <= 1:
-            self.ws_destinations.append_rows([["본사 공장"], ["A현장"], ["하청1"]])
-
-    # ---------------- Master 정보 ----------------
+    # ---------------- Master 정보 (짧게 캐싱해서 반복 조회 시 API 호출 절약) ----------------
     def get_categories(self):
-        return [v.strip() for v in self.ws_categories.col_values(1)[1:] if v.strip()]
+        vals = _cached_col_values("Categories", 1, _cache_version())
+        return [v.strip() for v in vals[1:] if v.strip()]
 
     def add_category(self, name):
         name = name.strip()
@@ -100,9 +130,21 @@ class SteelYardSheetDB:
         if name in self.get_categories():
             raise ValueError(f"[{name}] 는 이미 등록된 종류입니다.")
         self.ws_categories.append_row([name])
+        _bump_cache_version()
+
+    def delete_category(self, name):
+        try:
+            cell = self.ws_categories.find(name, in_column=1)
+        except Exception:
+            cell = None
+        if cell is None:
+            raise ValueError(f"[{name}] 종류를 찾을 수 없습니다.")
+        self.ws_categories.delete_rows(cell.row)
+        _bump_cache_version()
 
     def get_destinations(self):
-        return [v.strip() for v in self.ws_destinations.col_values(1)[1:] if v.strip()]
+        vals = _cached_col_values("Destinations", 1, _cache_version())
+        return [v.strip() for v in vals[1:] if v.strip()]
 
     def add_destination(self, name):
         name = name.strip()
@@ -111,10 +153,21 @@ class SteelYardSheetDB:
         if name in self.get_destinations():
             raise ValueError(f"[{name}] 는 이미 등록된 배송지입니다.")
         self.ws_destinations.append_row([name])
+        _bump_cache_version()
+
+    def delete_destination(self, name):
+        try:
+            cell = self.ws_destinations.find(name, in_column=1)
+        except Exception:
+            cell = None
+        if cell is None:
+            raise ValueError(f"[{name}] 배송지를 찾을 수 없습니다.")
+        self.ws_destinations.delete_rows(cell.row)
+        _bump_cache_version()
 
     # ---------------- 내부 헬퍼 ----------------
     def _items_df(self):
-        records = self.ws_items.get_all_records()
+        records = _cached_all_records("Items", _cache_version())
         df = pd.DataFrame(records)
         if df.empty:
             return pd.DataFrame(columns=ITEMS_HEADERS)
@@ -154,6 +207,7 @@ class SteelYardSheetDB:
             clean_part_no, category_name, clean_spec, loc_code, "IN_STOCK",
             str(inbound_date), "", "", remarks or ""
         ])
+        _bump_cache_version()
 
     # ---------------- 적재위치 변경 ----------------
     def update_location(self, part_no, new_zone, new_row, new_col):
@@ -170,6 +224,7 @@ class SteelYardSheetDB:
             raise ValueError(f"[{new_loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
         self.ws_items.update_cell(row_idx, ITEMS_COL["위치"], new_loc_code)
+        _bump_cache_version()
 
     # ---------------- 2단계: 재고현황 체크 -> 출고예정(PENDING_DISPATCH) ----------------
     def move_to_pending_dispatch(self, part_numbers):
@@ -177,6 +232,7 @@ class SteelYardSheetDB:
             row_idx = self._find_item_row(p)
             if row_idx:
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "PENDING_DISPATCH")
+        _bump_cache_version()
 
     # ---------------- 3단계: 출고확정 -> 출고내역(DISPATCHED) ----------------
     def confirm_outbound(self, part_no, outbound_date, dest_name, remarks):
@@ -213,6 +269,7 @@ class SteelYardSheetDB:
             final_remarks,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ])
+        _bump_cache_version()
 
     # ---------------- 4단계: 보류 체크 -> 재고현황(IN_STOCK) 복원 ----------------
     def restore_to_in_stock(self, part_numbers):
@@ -222,6 +279,45 @@ class SteelYardSheetDB:
             row_idx = self._find_item_row(p)
             if row_idx:
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "IN_STOCK")
+        _bump_cache_version()
+
+    # ---------------- 재고현황 표에서 셀 직접 수정 ----------------
+    def update_item(self, original_part_no, new_part_no, category_name, spec, location_code, remarks):
+        """재고현황 표에서 종류/품번/규격/위치/특이사항을 한 번에 수정."""
+        row_idx = self._find_item_row(original_part_no)
+        if not row_idx:
+            raise ValueError(f"[{original_part_no}] 품번을 찾을 수 없습니다.")
+
+        new_part_no_clean = (new_part_no or "").strip().upper()
+        if not new_part_no_clean:
+            raise ValueError("품번은 비워둘 수 없습니다.")
+
+        if new_part_no_clean != original_part_no:
+            existing_row = self._find_item_row(new_part_no_clean)
+            if existing_row:
+                raise ValueError(f"[{new_part_no_clean}] 품번은 이미 다른 곳에서 사용 중입니다.")
+
+        loc_code = (location_code or "").strip().upper()
+        if not loc_code:
+            raise ValueError("위치는 비워둘 수 없습니다.")
+
+        df = self._items_df()
+        active = df[
+            (df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])) & (df["품번"] != original_part_no)
+        ]
+        if not active.empty and (active["위치"] == loc_code).any():
+            raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
+
+        clean_spec = (spec or "").strip().upper()
+        clean_remarks = remarks or ""
+
+        # 품번(A)~위치(D), 특이사항(I) 갱신
+        self.ws_items.update(
+            f"A{row_idx}:D{row_idx}",
+            [[new_part_no_clean, category_name, clean_spec, loc_code]],
+        )
+        self.ws_items.update_cell(row_idx, ITEMS_COL["특이사항"], clean_remarks)
+        _bump_cache_version()
 
     # ---------------- 조회 ----------------
     def search_current_stock(self, category_name="전체", part_kw="", spec_kw=""):
@@ -267,6 +363,42 @@ class SteelYardSheetDB:
 # ---------------------------------------------------------
 # 엑셀 다운로드 생성기
 # ---------------------------------------------------------
+def render_html_table(df, checkbox_col=None):
+    """조회 전용 화면(일반 작업자)에서 쓰는, 목업과 같은 스타일의 컴팩트한 표."""
+    if df.empty:
+        return
+    cols = [c for c in df.columns if c != checkbox_col]
+    header_html = "".join(
+        f'<th style="text-align:left;padding:5px 8px;color:var(--text-muted);'
+        f'border-bottom:0.5px solid var(--border);white-space:nowrap;">{c}</th>'
+        for c in cols
+    )
+    rows_html = ""
+    for _, row in df.iterrows():
+        cells = "".join(
+            f'<td style="padding:6px 8px;border-bottom:0.5px solid var(--border);'
+            f'white-space:nowrap;">{row[c] if str(row[c]).strip() else "-"}</td>'
+            for c in cols
+        )
+        rows_html += f"<tr>{cells}</tr>"
+
+    html = f"""
+    <div style="background:var(--surface-2);border:0.5px solid var(--border);
+                border-radius:12px;padding:10px;">
+      <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse;font-size:12px;width:100%;">
+          <thead><tr>{header_html}</tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:8px;">
+        ← 좌우로 스와이프하면 모든 컬럼을 볼 수 있습니다
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def generate_excel_report(df, title="재고현황"):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -343,7 +475,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📲 제2야적장 입출고 관리 (Google Sheets 연동)")
+st.markdown(
+    """
+    <div style="display:flex; align-items:baseline; gap:8px; white-space:nowrap;
+                overflow:hidden; margin:0 0 12px 0;">
+        <h1 style="font-size:clamp(15px, 5vw, 26px); text-overflow:ellipsis;
+                   overflow:hidden; margin:0;">
+            📲 제2야적장 입출고 관리
+        </h1>
+        <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
+                     font-size:clamp(10px, 2.8vw, 14px); font-weight:600;
+                     color:#1B3A6B; flex-shrink:0;">
+            서진로지스
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 try:
     ADMIN_PIN = st.secrets["admin_pin"]
@@ -478,18 +626,24 @@ with tab_stock:
                         except Exception as e:
                             st.error(f"❌ 위치 변경 실패: {e}")
 
-            st.info("💡 출고 예정으로 보낼 품번의 **[출고 선택]** 체크박스를 체크한 후 아래 버튼을 누르세요.")
+            st.info(
+                "💡 **셀을 탭하면 종류·품번·규격·위치·특이사항을 바로 수정**할 수 있습니다. "
+                "고치신 후 아래 [✏️ 변경사항 저장]을 눌러야 반영됩니다. "
+                "출고 예정으로 보낼 품번은 **[출고 선택]** 체크박스를 체크하세요."
+            )
 
-            stock_df_display = stock_df.copy()
+            stock_df_display = stock_df.reset_index(drop=True).copy()
             stock_df_display["출고 선택"] = False
+
+            cat_options = sorted(set(db.get_categories()) | set(stock_df_display["종류"].unique().tolist()))
 
             edited_df = st.data_editor(
                 stock_df_display,
                 use_container_width=True,
                 hide_index=True,
-                disabled=["종류", "품번", "규격", "적재위치", "입고일", "특이사항"],
+                disabled=["입고일"],
                 column_config={
-                    "종류": st.column_config.TextColumn("종류", width="small"),
+                    "종류": st.column_config.SelectboxColumn("종류", width="small", options=cat_options),
                     "품번": st.column_config.TextColumn("품번", width="small"),
                     "규격": st.column_config.TextColumn("규격", width="small"),
                     "적재위치": st.column_config.TextColumn("위치", width="small"),
@@ -499,105 +653,142 @@ with tab_stock:
                 },
                 key="editor_stock",
             )
-            selected_parts = edited_df[edited_df["출고 선택"] == True]["품번"].tolist()
 
-            if st.button("🚚 선택 항목 출고예정으로 이동", type="primary", use_container_width=True):
-                if not selected_parts:
-                    st.warning("출고 예정으로 이동할 품번을 1개 이상 선택해주세요.")
-                else:
-                    db.move_to_pending_dispatch(selected_parts)
-                    st.success(f"✅ 총 {len(selected_parts)}건이 [출고예정내역]으로 이동되었습니다: {', '.join(selected_parts)}")
-                    st.rerun()
+            col_save, col_move = st.columns(2)
+
+            with col_save:
+                if st.button("✏️ 변경사항 저장", use_container_width=True):
+                    changed_rows = []
+                    for i in stock_df_display.index:
+                        orig = stock_df_display.loc[i]
+                        new = edited_df.loc[i]
+                        if (
+                            orig["종류"] != new["종류"]
+                            or orig["품번"] != new["품번"]
+                            or orig["규격"] != new["규격"]
+                            or orig["적재위치"] != new["적재위치"]
+                            or orig["특이사항"] != new["특이사항"]
+                        ):
+                            changed_rows.append((orig, new))
+
+                    if not changed_rows:
+                        st.info("변경된 내용이 없습니다.")
+                    else:
+                        errors = []
+                        success_count = 0
+                        for orig, new in changed_rows:
+                            try:
+                                db.update_item(
+                                    original_part_no=orig["품번"],
+                                    new_part_no=new["품번"],
+                                    category_name=new["종류"],
+                                    spec=new["규격"],
+                                    location_code=new["적재위치"],
+                                    remarks=new["특이사항"],
+                                )
+                                success_count += 1
+                            except Exception as e:
+                                errors.append(f"[{orig['품번']}] {e}")
+
+                        if success_count:
+                            st.success(f"✅ {success_count}건 수정 완료!")
+                        for err in errors:
+                            st.error(f"❌ {err}")
+                        if success_count:
+                            st.rerun()
+
+            with col_move:
+                selected_parts = edited_df[edited_df["출고 선택"] == True]["품번"].tolist()
+                if st.button("🚚 선택 항목 출고예정으로 이동", type="primary", use_container_width=True):
+                    if not selected_parts:
+                        st.warning("출고 예정으로 이동할 품번을 1개 이상 선택해주세요.")
+                    else:
+                        db.move_to_pending_dispatch(selected_parts)
+                        st.success(f"✅ 총 {len(selected_parts)}건이 [출고예정내역]으로 이동되었습니다: {', '.join(selected_parts)}")
+                        st.rerun()
         else:
-            st.dataframe(
-                stock_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "종류": st.column_config.TextColumn("종류", width="small"),
-                    "품번": st.column_config.TextColumn("품번", width="small"),
-                    "규격": st.column_config.TextColumn("규격", width="small"),
-                    "적재위치": st.column_config.TextColumn("위치", width="small"),
-                    "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                    "특이사항": st.column_config.TextColumn("특이사항", width="small"),
-                },
-            )
+            render_html_table(stock_df)
     else:
         st.info("조건에 일치하는 재고가 없습니다.")
 
-# TAB 3: 출고예정내역
+# TAB 3: 출고예정내역 (관리자 전용)
 with tab_pending:
     st.subheader("🚚 출고예정내역")
 
-    pending_df = db.search_pending_dispatch()
-    st.metric("출고 대기 수량", f"{len(pending_df)}건")
+    if not is_admin:
+        st.warning("🔒 출고예정내역은 관리자 전용 화면입니다. 재고 조회는 [실시간 재고현황] 탭을, 완료된 출고 기록은 [출고내역] 탭을 이용해주세요.")
+    else:
+        pending_df = db.search_pending_dispatch()
+        st.metric("출고 대기 수량", f"{len(pending_df)}건")
 
-    if not pending_df.empty:
-        if is_admin:
-            st.info(
-                "💡 **보류**할 품번은 [보류 체크]를 체크한 뒤 [↩️ 선택 항목 보류 → 재고현황 복원] 버튼을 누르세요. "
-                "출고를 확정할 품번은 아래 출고확정 양식을 이용하세요."
-            )
-
-            pending_df_display = pending_df.copy()
-            pending_df_display["보류 체크"] = False
-
-            edited_pending_df = st.data_editor(
-                pending_df_display,
-                use_container_width=True,
-                hide_index=True,
-                disabled=["종류", "품번", "규격", "적재위치", "입고일", "특이사항"],
-                column_config={
-                    "종류": st.column_config.TextColumn("종류", width="small"),
-                    "품번": st.column_config.TextColumn("품번", width="small"),
-                    "규격": st.column_config.TextColumn("규격", width="small"),
-                    "적재위치": st.column_config.TextColumn("위치", width="small"),
-                    "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                    "특이사항": st.column_config.TextColumn("특이사항", width="small"),
-                    "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
-                },
-                key="editor_pending",
-            )
-            hold_parts = edited_pending_df[edited_pending_df["보류 체크"] == True]["품번"].tolist()
-
-            if st.button("↩️ 선택 항목 보류 → 재고현황 복원", use_container_width=True):
-                if not hold_parts:
-                    st.warning("보류 처리할 품번을 1개 이상 선택해주세요.")
-                else:
-                    db.restore_to_in_stock(hold_parts)
-                    st.success(f"↩️ 총 {len(hold_parts)}건이 보류 처리되어 [실시간 재고현황]으로 복원되었습니다: {', '.join(hold_parts)}")
-                    st.rerun()
-
-            st.divider()
-            st.markdown("#### ✅ 출고 확정 처리")
-
+        if not pending_df.empty:
             destinations = db.get_destinations()
             if not destinations:
                 st.error("등록된 배송지가 없습니다. Master 관리 탭에서 추가해 주세요.")
             else:
-                with st.form("pending_confirm_form", clear_on_submit=True):
-                    col_p, col_dst, col_dt, col_rem = st.columns([2.5, 2, 1.5, 2])
-                    with col_p:
-                        target_part = st.selectbox("출고 확정 대상 품번", pending_df["품번"].tolist())
-                    with col_dst:
-                        dest_name = st.selectbox("출고 배송지", destinations)
-                    with col_dt:
-                        out_date = st.date_input("출고일", datetime.now())
-                    with col_rem:
-                        out_remarks = st.text_input("출고 비고", placeholder="예: A현장 1차")
+                st.info(
+                    "💡 **보류**를 체크하면 [실시간 재고현황]으로 복원되고, **확정**을 체크하면 "
+                    "옆의 배송지로 [출고내역]으로 이동합니다 (출고일자는 오늘 날짜로 자동 입력). "
+                    "체크 후 아래 [적용] 버튼을 눌러주세요."
+                )
 
-                    if st.form_submit_button("✅ 최종출고 확정", use_container_width=True, type="primary"):
-                        try:
-                            db.confirm_outbound(target_part, out_date, dest_name, out_remarks)
-                            st.success(f"🎉 [{target_part}] 최종 출고 처리 완료! (출고내역으로 이동, 재고현황에서 제외)")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ 출고 실패: {e}")
+                pending_df_display = pending_df.reset_index(drop=True).copy()
+                pending_df_display["보류 체크"] = False
+                pending_df_display["확정 체크"] = False
+                pending_df_display["배송지"] = destinations[0]
+
+                edited_pending_df = st.data_editor(
+                    pending_df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특이사항"],
+                    column_config={
+                        "종류": st.column_config.TextColumn("종류", width="small"),
+                        "품번": st.column_config.TextColumn("품번", width="small"),
+                        "규격": st.column_config.TextColumn("규격", width="small"),
+                        "적재위치": st.column_config.TextColumn("위치", width="small"),
+                        "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
+                        "특이사항": st.column_config.TextColumn("특이사항", width="small"),
+                        "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
+                        "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
+                        "배송지": st.column_config.SelectboxColumn("배송지", width="small", options=destinations),
+                    },
+                    key="editor_pending",
+                )
+
+                if st.button("⚡ 적용", type="primary", use_container_width=True):
+                    hold_rows = edited_pending_df[edited_pending_df["보류 체크"] == True]
+                    confirm_rows = edited_pending_df[
+                        (edited_pending_df["확정 체크"] == True) & (edited_pending_df["보류 체크"] == False)
+                    ]
+
+                    if hold_rows.empty and confirm_rows.empty:
+                        st.warning("보류 또는 확정으로 체크된 품번이 없습니다.")
+                    else:
+                        today = datetime.now().date()
+
+                        if not hold_rows.empty:
+                            hold_parts = hold_rows["품번"].tolist()
+                            db.restore_to_in_stock(hold_parts)
+                            st.success(f"↩️ 총 {len(hold_parts)}건 보류 → [실시간 재고현황]으로 복원되었습니다: {', '.join(hold_parts)}")
+
+                        confirm_errors = []
+                        confirm_success = []
+                        for _, row in confirm_rows.iterrows():
+                            try:
+                                db.confirm_outbound(row["품번"], today, row["배송지"], "")
+                                confirm_success.append(row["품번"])
+                            except Exception as e:
+                                confirm_errors.append(f"[{row['품번']}] {e}")
+
+                        if confirm_success:
+                            st.success(f"🎉 총 {len(confirm_success)}건 확정 → [출고내역]으로 이동되었습니다: {', '.join(confirm_success)}")
+                        for err in confirm_errors:
+                            st.error(f"❌ {err}")
+
+                        st.rerun()
         else:
-            st.dataframe(pending_df, use_container_width=True, hide_index=True)
-            st.info("💡 출고 확정 및 보류 처리는 관리자 권한이 필요합니다.")
-    else:
-        st.info("현재 출고 예정인 내역이 없습니다.")
+            st.info("현재 출고 예정인 내역이 없습니다.")
 
 # TAB 4: 출고내역
 with tab_history:
@@ -616,7 +807,7 @@ with tab_history:
             use_container_width=True,
         )
         st.divider()
-        st.dataframe(dispatched_df, use_container_width=True, hide_index=True)
+        render_html_table(dispatched_df)
     else:
         st.info("출고 처리된 내역이 없습니다.")
 
@@ -640,6 +831,20 @@ with tab_manage:
                     except Exception as e:
                         st.error(f"추가 실패: {e}")
 
+            st.markdown("##### 🗑️ 강판 종류 삭제")
+            existing_cats = db.get_categories()
+            if existing_cats:
+                cat_to_delete = st.selectbox("삭제할 종류 선택", existing_cats, key="del_cat_select")
+                if st.button("종류 삭제", use_container_width=True):
+                    try:
+                        db.delete_category(cat_to_delete)
+                        st.success(f"[{cat_to_delete}] 삭제 완료! (기존 재고 데이터는 그대로 유지됩니다)")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"삭제 실패: {e}")
+            else:
+                st.caption("등록된 종류가 없습니다.")
+
         with col_dest:
             st.markdown("##### 🚚 배송지 추가")
             new_dest = st.text_input("신규 배송지", placeholder="예: B공장", key="new_dest_input")
@@ -651,3 +856,18 @@ with tab_manage:
                         st.rerun()
                     except Exception as e:
                         st.error(f"추가 실패: {e}")
+
+            st.markdown("##### 🗑️ 배송지 삭제")
+            existing_dests = db.get_destinations()
+            if existing_dests:
+                dest_to_delete = st.selectbox("삭제할 배송지 선택", existing_dests, key="del_dest_select")
+                if st.button("배송지 삭제", use_container_width=True):
+                    try:
+                        db.delete_destination(dest_to_delete)
+                        st.success(f"[{dest_to_delete}] 삭제 완료! (기존 출고 데이터는 그대로 유지됩니다)")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"삭제 실패: {e}")
+            else:
+                st.caption("등록된 배송지가 없습니다.")
+
