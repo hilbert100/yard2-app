@@ -253,6 +253,59 @@ class SteelYardSheetDB:
         ])
         _bump_cache_version()
 
+    def bulk_register_inbound(self, rows):
+        """일괄 업로드 전용. rows: [{part_no, category_name, spec, zone, row, col,
+        inbound_date, remarks, level}, ...]
+        구글 시트를 딱 한 번만 읽어 전체를 메모리에서 검증한 뒤, 유효한 항목을
+        한 번의 append_rows 호출로 몰아서 저장한다 (API 호출 수를 줄여 할당량 초과 방지).
+        반환: [(품번, 성공여부, 사유), ...] — rows와 같은 순서."""
+        existing_df = self._items_df()
+        existing_parts = set(existing_df["품번"].tolist()) if not existing_df.empty else set()
+        active_locations = set()
+        if not existing_df.empty:
+            active_locations = set(
+                existing_df[existing_df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])]["위치"].tolist()
+            )
+        valid_categories = set(self.get_categories())
+
+        results = []
+        new_sheet_rows = []
+        seen_parts = set()
+        seen_locations = set()
+
+        for r in rows:
+            try:
+                clean_part_no = normalize_part_no(r.get("part_no", ""))
+                if not clean_part_no:
+                    raise ValueError("품번이 비어있습니다.")
+                if clean_part_no in existing_parts or clean_part_no in seen_parts:
+                    raise ValueError(f"[{clean_part_no}] 품번은 이미 사용된 고유번호입니다.")
+
+                category_name = r.get("category_name", "")
+                if category_name not in valid_categories:
+                    raise ValueError(f"[{category_name}] 는 등록되지 않은 종류입니다. Master 관리에서 먼저 추가해주세요.")
+
+                loc_code = format_location_code(r["zone"], r["row"], r["col"], r.get("level", ""))
+                if loc_code in active_locations or loc_code in seen_locations:
+                    raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
+
+                clean_spec = (r.get("spec") or "").strip().upper()
+                new_sheet_rows.append([
+                    clean_part_no, category_name, clean_spec, loc_code, "IN_STOCK",
+                    str(r["inbound_date"]), "", "", r.get("remarks") or ""
+                ])
+                seen_parts.add(clean_part_no)
+                seen_locations.add(loc_code)
+                results.append((clean_part_no, True, ""))
+            except Exception as e:
+                results.append((r.get("part_no", "-"), False, str(e)))
+
+        if new_sheet_rows:
+            self.ws_items.append_rows(new_sheet_rows)
+            _bump_cache_version()
+
+        return results
+
     # ---------------- 적재위치 변경 ----------------
     def update_location(self, part_no, new_zone, new_row, new_col, level=""):
         clean_part_no = normalize_part_no(part_no)
@@ -681,7 +734,12 @@ with tab_in:
                 st.write(f"총 {len(upload_df)}줄을 읽었습니다.")
 
                 if st.button("⚡ 일괄 업로드 실행", type="primary", use_container_width=True):
-                    results = []
+                    # 1단계: 엑셀 형식만 미리 정리 (아직 구글 시트에 접근하지 않음 — API 호출 없음)
+                    skip_results = []  # (excel_row_no, "-", "⚠️ 건너뜀", 사유)
+                    shape_error_results = []  # (excel_row_no, 품번, "❌ 실패", 사유) — 열/행 숫자 오류 등
+                    candidate_rows = []  # bulk_register_inbound에 넘길 유효 후보들
+                    row_no_by_part = {}  # 결과를 다시 엑셀 행 번호와 매칭하기 위한 매핑
+
                     for i, row in upload_df.iterrows():
                         excel_row_no = i + 3  # 헤더(1) + 예시(2) 다음부터 시작하는 실제 엑셀 행 번호
 
@@ -701,7 +759,7 @@ with tab_in:
                         part_components = [p for p in [p1, p2, p3, p4] if p]
                         if not (cat and len(part_components) == 4 and zone and row_n_raw and col_n_raw):
                             if cat or p1 or p2 or p3 or p4 or zone or row_n_raw or col_n_raw:
-                                results.append((excel_row_no, "-", "⚠️ 건너뜀", "필수 항목(종류/품번1~4단/구역/열/행) 중 비어있는 칸이 있습니다."))
+                                skip_results.append((excel_row_no, "-", "⚠️ 건너뜀", "필수 항목(종류/품번1~4단/구역/열/행) 중 비어있는 칸이 있습니다."))
                             continue
 
                         full_part_no = "-".join(part_components).upper()
@@ -710,7 +768,7 @@ with tab_in:
                             row_n = int(float(row_n_raw))
                             col_n = int(float(col_n_raw))
                         except ValueError:
-                            results.append((excel_row_no, full_part_no, "❌ 실패", f"열/행은 숫자여야 합니다 (입력값: {row_n_raw}, {col_n_raw})"))
+                            shape_error_results.append((excel_row_no, full_part_no, "❌ 실패", f"열/행은 숫자여야 합니다 (입력값: {row_n_raw}, {col_n_raw})"))
                             continue
 
                         in_date_val = row.get("입고일")
@@ -720,21 +778,32 @@ with tab_in:
                             parsed = pd.to_datetime(in_date_val, errors="coerce")
                             in_date = parsed.date() if not pd.isna(parsed) else datetime.now().date()
 
-                        try:
-                            db.register_inbound(full_part_no, cat, spec, zone, row_n, col_n, in_date, remarks, level)
-                            saved_part_no = normalize_part_no(full_part_no)
-                            results.append((excel_row_no, saved_part_no, "✅ 성공", ""))
-                        except Exception as e:
-                            results.append((excel_row_no, full_part_no, "❌ 실패", str(e)))
+                        candidate_rows.append({
+                            "part_no": full_part_no, "category_name": cat, "spec": spec,
+                            "zone": zone, "row": row_n, "col": col_n,
+                            "inbound_date": in_date, "remarks": remarks, "level": level,
+                        })
+                        row_no_by_part[normalize_part_no(full_part_no)] = excel_row_no
 
-                    success_count = sum(1 for r in results if r[2] == "✅ 성공")
-                    fail_count = sum(1 for r in results if r[2] == "❌ 실패")
-                    skip_count = sum(1 for r in results if r[2] == "⚠️ 건너뜀")
+                    # 2단계: 구글 시트는 딱 두 번만 호출 (읽기 1회 + 쓰기 1회)해서 후보들을 실제로 등록
+                    bulk_results = db.bulk_register_inbound(candidate_rows) if candidate_rows else []
+
+                    final_results = list(skip_results) + list(shape_error_results)
+                    for part_no, ok, msg in bulk_results:
+                        normalized = normalize_part_no(part_no)
+                        excel_row_no = row_no_by_part.get(normalized, "-")
+                        final_results.append((excel_row_no, normalized, "✅ 성공" if ok else "❌ 실패", "" if ok else msg))
+
+                    final_results.sort(key=lambda r: (r[0] if isinstance(r[0], int) else 9999))
+
+                    success_count = sum(1 for r in final_results if r[2] == "✅ 성공")
+                    fail_count = sum(1 for r in final_results if r[2] == "❌ 실패")
+                    skip_count = sum(1 for r in final_results if r[2] == "⚠️ 건너뜀")
 
                     st.success(f"✅ 성공 {success_count}건 · ❌ 실패 {fail_count}건 · ⚠️ 건너뜀 {skip_count}건")
 
-                    if results:
-                        result_df = pd.DataFrame(results, columns=["엑셀 행", "품번", "결과", "사유"])
+                    if final_results:
+                        result_df = pd.DataFrame(final_results, columns=["엑셀 행", "품번", "결과", "사유"])
                         st.dataframe(result_df, use_container_width=True, hide_index=True)
 
                     if success_count:
@@ -835,7 +904,7 @@ with tab_stock:
                 disabled=["입고일"],
                 column_config={
                     "종류": st.column_config.SelectboxColumn("종류", width="small", options=cat_options),
-                    "품번": st.column_config.TextColumn("품번", width="small"),
+                    "품번": st.column_config.TextColumn("품번", width="large"),
                     "규격": st.column_config.TextColumn("규격", width="small"),
                     "적재위치": st.column_config.TextColumn("위치", width="small"),
                     "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
@@ -926,7 +995,7 @@ with tab_pending:
                     disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항"],
                     column_config={
                         "종류": st.column_config.TextColumn("종류", width="small"),
-                        "품번": st.column_config.TextColumn("품번", width="small"),
+                        "품번": st.column_config.TextColumn("품번", width="large"),
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
@@ -1091,6 +1160,3 @@ with tab_manage:
                         st.error(f"삭제 실패: {e}")
             else:
                 st.caption("등록된 배송지가 없습니다.")
-
-
-
