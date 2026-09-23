@@ -522,12 +522,27 @@ class SteelYardSheetDB:
             return pd.DataFrame(columns=cols)
         return df[cols].sort_values("품번").reset_index(drop=True)
 
-    def search_dispatched(self):
+    def search_dispatched(self, category_name="전체", part_kw="", start_date=None, end_date=None):
         df = self._items_df()
         cols = ["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항"]
         if df.empty:
             return pd.DataFrame(columns=cols)
         df = df[df["상태"] == "DISPATCHED"].copy()
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+
+        if category_name and category_name != "전체":
+            df = df[df["종류"] == category_name]
+        if part_kw:
+            df = df[df["품번"].str.contains(part_kw.strip().upper(), na=False, regex=False)]
+        if (start_date or end_date) and not df.empty:
+            parsed = pd.to_datetime(df["출고일"], errors="coerce")
+            if start_date:
+                df = df[parsed >= pd.Timestamp(start_date)]
+                parsed = pd.to_datetime(df["출고일"], errors="coerce")
+            if end_date:
+                df = df[parsed <= pd.Timestamp(end_date)]
+
         if df.empty:
             return pd.DataFrame(columns=cols)
         return df[cols].sort_values(["출고일", "품번"], ascending=[False, True]).reset_index(drop=True)
@@ -1134,8 +1149,23 @@ with tab_pending:
 with tab_history:
     st.subheader("📜 출고 완료 내역")
 
-    dispatched_df = db.search_dispatched()
-    st.metric("총 누적 출고 수량", f"{len(dispatched_df)}건")
+    st.markdown("##### 🎯 조건별 검색")
+    hf_col1, hf_col2 = st.columns([1.5, 2])
+    hist_cat_list = ["전체"] + db.get_categories()
+    hist_sel_cat = hf_col1.selectbox("종류 선택", hist_cat_list, key="hist_cat_filter")
+    hist_sel_part = hf_col2.text_input("품번 검색", placeholder="예: FA-3B 또는 011", key="hist_part_filter")
+
+    hf_col3, hf_col4 = st.columns(2)
+    hist_start_date = hf_col3.date_input("출고일 시작", value=None, key="hist_start_date")
+    hist_end_date = hf_col4.date_input("출고일 종료", value=None, key="hist_end_date")
+
+    dispatched_df = db.search_dispatched(
+        category_name=hist_sel_cat,
+        part_kw=hist_sel_part,
+        start_date=hist_start_date,
+        end_date=hist_end_date,
+    )
+    st.metric("조회된 출고 수량", f"{len(dispatched_df)}건")
 
     if not dispatched_df.empty:
         excel_out_data = generate_excel_report(dispatched_df, title="출고_이관내역")
