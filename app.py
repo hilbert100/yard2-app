@@ -44,12 +44,15 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 LEVEL_ALIASES = {"상": "상", "상단": "상", "위": "상", "top": "상", "하": "하", "하단": "하", "아래": "하", "bottom": "하"}
 
 
+STRAY_QUOTE_CHARS = ("'", "\u2019", "\u2018", "`")  # 작은따옴표류 + 백틱
+
+
 def strip_stray_quotes(s):
-    """엑셀 텍스트 서식용 작은따옴표(' / ')가 값 어디에 섞여 있든 제거."""
+    """엑셀 텍스트 서식용으로 붙인 작은따옴표·백틱이 값 어디에 섞여 있든 제거."""
     if not s:
         return s
     cleaned = str(s)
-    for q in ("'", "\u2019", "\u2018"):
+    for q in STRAY_QUOTE_CHARS:
         cleaned = cleaned.replace(q, "")
     return cleaned.strip()
 
@@ -59,7 +62,7 @@ def normalize_part_no(raw):
     이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')"""
     s = (raw or "").strip().upper()
     # 엑셀 텍스트 서식용 작은따옴표(' / ')가 값에 섞여 들어온 경우 제거
-    s = s.replace("'", "").replace("\u2019", "").replace("\u2018", "")
+    s = strip_stray_quotes(s)
     if not s:
         return s
     if not s.startswith("F"):
@@ -443,14 +446,14 @@ class SteelYardSheetDB:
         변경된 행만 업데이트. 반환: [(원래품번, 수정후품번), ...]"""
         df = self._items_df()
         changed = []
-        quote_chars = ("'", "\u2019", "\u2018")
+        quote_chars = STRAY_QUOTE_CHARS
         for i, row in df.iterrows():
             old_part = row["품번"]
             new_part = normalize_part_no(old_part)
             old_remarks = row["특기사항"]
             new_remarks = old_remarks
             if any(q in old_remarks for q in quote_chars):
-                new_remarks = old_remarks.replace("'", "").replace("\u2019", "").replace("\u2018", "").strip()
+                new_remarks = strip_stray_quotes(old_remarks)
 
             if new_part != old_part or new_remarks != old_remarks:
                 row_idx = self._find_item_row(old_part)
@@ -789,11 +792,9 @@ with tab_in:
                             val = row.get(col)
                             if pd.isna(val):
                                 return ""
-                            # 엑셀에서 텍스트 서식용으로 붙인 작은따옴표(' / ')가
-                            # 값 앞에 그대로 섞여 들어오는 경우가 있어 제거
-                            # 엑셀 텍스트 서식용 작은따옴표(' / ')가 값 안 어디에 있든(맨 앞/중간/뒤) 제거
+                            # 엑셀 텍스트 서식용 작은따옴표·백틱이 값 안 어디에 있든(맨 앞/중간/뒤) 제거
                             cleaned = str(val).strip()
-                            for q in ("'", "\u2019", "\u2018"):
+                            for q in STRAY_QUOTE_CHARS:
                                 cleaned = cleaned.replace(q, "")
                             return cleaned.strip()
 
