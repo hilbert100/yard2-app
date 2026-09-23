@@ -669,10 +669,19 @@ st.markdown("""
     justify-content: center !important;
     text-align: center !important;
 }
-/* 구역도 지도 축소판 아래의 "제2야적장 구역식별Map" 팝오버 라벨에 밑줄 */
+/* 구역도 지도 축소판 + "제2야적장 구역식별Map" 라벨을 같은 폭으로 정중앙 정렬 */
+[data-testid="stImage"] {
+    display: flex;
+    justify-content: center;
+}
+[data-testid="stPopover"] {
+    display: flex;
+    justify-content: center;
+}
 [data-testid="stPopover"] button p {
     text-decoration: underline;
     font-size: 11px !important;
+    white-space: nowrap;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -700,7 +709,7 @@ with title_col:
 
 with map_col:
     st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", width=110)
-    with st.popover("제2야적장 구역식별Map", use_container_width=True):
+    with st.popover("제2야적장 구역식별Map", use_container_width=False):
         st.markdown("**제2야적장 구역 배치도**")
         st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", use_container_width=True)
 
