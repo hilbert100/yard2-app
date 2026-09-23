@@ -669,23 +669,11 @@ st.markdown("""
     justify-content: center !important;
     text-align: center !important;
 }
-/* 구역도 지도 축소판 + "제2야적장 구역식별Map" 라벨을 정확히 같은 중심선에 정렬 */
-[data-testid="stImage"] img {
-    display: block;
-    margin: 0 auto;
-}
-[data-testid="stPopover"] {
-    width: 100%;
-}
-[data-testid="stPopover"] button {
-    display: block;
-    margin: 0 auto !important;
-}
+/* "제2야적장 구역식별Map" 팝오버 라벨에 밑줄 (위치 정렬은 컬럼 레이아웃으로 처리) */
 [data-testid="stPopover"] button p {
     text-decoration: underline;
     font-size: 11px !important;
     white-space: nowrap;
-    text-align: center;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -712,10 +700,15 @@ with title_col:
     )
 
 with map_col:
-    st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", width=110)
-    with st.popover("제2야적장 구역식별Map", use_container_width=False):
-        st.markdown("**제2야적장 구역 배치도**")
-        st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", use_container_width=True)
+    img_l, img_m, img_r = st.columns([1, 3, 1])
+    with img_m:
+        st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", width=110)
+
+    pop_l, pop_m, pop_r = st.columns([1, 3, 1])
+    with pop_m:
+        with st.popover("제2야적장 구역식별Map", use_container_width=False):
+            st.markdown("**제2야적장 구역 배치도**")
+            st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", use_container_width=True)
 
 try:
     ADMIN_PIN = st.secrets["admin_pin"]
