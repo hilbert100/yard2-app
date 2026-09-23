@@ -425,6 +425,33 @@ class SteelYardSheetDB:
         self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], clean_remarks)
         _bump_cache_version()
 
+    # ---------------- 유지보수: 기존 데이터에서 따옴표 등 잘못 섞인 문자 정리 ----------------
+    def clean_stray_quotes(self):
+        """이미 저장된 품번(및 특기사항)에 섞여 들어간 작은따옴표(' / ')를 찾아서 일괄 정리.
+        변경된 행만 업데이트. 반환: [(원래품번, 수정후품번), ...]"""
+        df = self._items_df()
+        changed = []
+        quote_chars = ("'", "\u2019", "\u2018")
+        for i, row in df.iterrows():
+            old_part = row["품번"]
+            new_part = normalize_part_no(old_part)
+            old_remarks = row["특기사항"]
+            new_remarks = old_remarks
+            if any(q in old_remarks for q in quote_chars):
+                new_remarks = old_remarks.replace("'", "").replace("\u2019", "").replace("\u2018", "").strip()
+
+            if new_part != old_part or new_remarks != old_remarks:
+                row_idx = self._find_item_row(old_part)
+                if row_idx:
+                    if new_part != old_part:
+                        self.ws_items.update_cell(row_idx, ITEMS_COL["품번"], new_part)
+                    if new_remarks != old_remarks:
+                        self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], new_remarks)
+                    changed.append((old_part, new_part))
+        if changed:
+            _bump_cache_version()
+        return changed
+
     # ---------------- 품목 삭제 (재고현황 / 출고내역 공통) ----------------
     def delete_item(self, part_no):
         """품번을 시스템에서 완전히 삭제 (상태 무관). 출고 이력(DispatchLog)은 영향받지 않음."""
@@ -670,7 +697,7 @@ with tab_in:
                     cat_name = st.selectbox("종류", categories)
 
                 with col_part:
-                    st.markdown("**품번 (4단 분할, 맨 앞 F는 자동으로 붙습니다)**")
+                    st.markdown("**품번 (4단 분할, 4단은 없으면 비워두세요. 맨 앞 F는 자동으로 붙습니다)**")
                     p1, p2, p3, p4 = st.columns(4)
                     part_1 = p1.text_input("1단", placeholder="B2", label_visibility="collapsed")
                     part_2 = p2.text_input("2단", placeholder="2B", label_visibility="collapsed")
@@ -697,9 +724,10 @@ with tab_in:
                 st.divider()
 
                 if st.form_submit_button("⚡ 실시간 입고 등록", use_container_width=True):
+                    # 품번 1~3단은 필수, 4단(맨 끝자리)은 없는 품번도 있어서 비워도 됨
                     part_components = [p.strip() for p in [part_1, part_2, part_3, part_4] if p.strip()]
-                    if len(part_components) < 4:
-                        st.error("품번 4단 칸을 모두 입력해주세요.")
+                    if not (part_1.strip() and part_2.strip() and part_3.strip()):
+                        st.error("품번 1~3단을 입력해주세요. (4단은 비워도 됩니다)")
                     else:
                         full_part_no = "-".join(part_components).upper()
                         try:
@@ -762,10 +790,11 @@ with tab_in:
                         level = g("층(선택)")
                         remarks = g("특기사항")
 
+                        # 품번 1~3단은 필수, 4단(맨 끝자리)은 없는 품번도 있어서 비워도 됨
                         part_components = [p for p in [p1, p2, p3, p4] if p]
-                        if not (cat and len(part_components) == 4 and zone and row_n_raw and col_n_raw):
+                        if not (cat and p1 and p2 and p3 and zone and row_n_raw and col_n_raw):
                             if cat or p1 or p2 or p3 or p4 or zone or row_n_raw or col_n_raw:
-                                skip_results.append((excel_row_no, "-", "⚠️ 건너뜀", "필수 항목(종류/품번1~4단/구역/열/행) 중 비어있는 칸이 있습니다."))
+                                skip_results.append((excel_row_no, "-", "⚠️ 건너뜀", "필수 항목(종류/품번1~3단/구역/열/행) 중 비어있는 칸이 있습니다. (품번 4단은 비워도 됩니다)"))
                             continue
 
                         full_part_no = "-".join(part_components).upper()
@@ -910,7 +939,7 @@ with tab_stock:
                 disabled=["입고일"],
                 column_config={
                     "종류": st.column_config.SelectboxColumn("종류", width="small", options=cat_options),
-                    "품번": st.column_config.TextColumn("품번", width="large"),
+                    "품번": st.column_config.TextColumn("품번", width="medium"),
                     "규격": st.column_config.TextColumn("규격", width="small"),
                     "적재위치": st.column_config.TextColumn("위치", width="small"),
                     "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
@@ -1001,7 +1030,7 @@ with tab_pending:
                     disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항"],
                     column_config={
                         "종류": st.column_config.TextColumn("종류", width="small"),
-                        "품번": st.column_config.TextColumn("품번", width="large"),
+                        "품번": st.column_config.TextColumn("품번", width="medium"),
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
@@ -1113,6 +1142,23 @@ with tab_manage:
         st.warning("🔒 기준 정보 관리는 관리자 권한이 필요합니다. 상단에서 관리자 비밀번호를 인증해 주세요.")
     else:
         st.subheader("⚙️ 기준 정보(Master) 관리")
+
+        st.markdown("##### 🧹 데이터 정리")
+        st.caption("과거에 엑셀 일괄 업로드 등으로 품번·특기사항에 작은따옴표(')가 섞여 들어간 경우, 한 번에 정리합니다.")
+        if st.button("🧹 기존 데이터에서 따옴표 정리 실행", use_container_width=True):
+            with st.spinner("전체 재고 데이터를 확인하는 중..."):
+                changed = db.clean_stray_quotes()
+            if changed:
+                st.success(f"✅ 총 {len(changed)}건 정리 완료!")
+                st.dataframe(
+                    pd.DataFrame(changed, columns=["수정 전", "수정 후"]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info("정리할 항목이 없습니다. 이미 깨끗합니다.")
+
+        st.divider()
+
         col_cat, col_dest = st.columns(2)
 
         with col_cat:
