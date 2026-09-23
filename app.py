@@ -370,6 +370,15 @@ class SteelYardSheetDB:
         self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], clean_remarks)
         _bump_cache_version()
 
+    # ---------------- 품목 삭제 (재고현황 / 출고내역 공통) ----------------
+    def delete_item(self, part_no):
+        """품번을 시스템에서 완전히 삭제 (상태 무관). 출고 이력(DispatchLog)은 영향받지 않음."""
+        row_idx = self._find_item_row(part_no)
+        if not row_idx:
+            raise ValueError(f"[{part_no}] 품번을 찾을 수 없습니다.")
+        self.ws_items.delete_rows(row_idx)
+        _bump_cache_version()
+
     # ---------------- 조회 ----------------
     def search_current_stock(self, category_name="전체", part_kw="", spec_kw=""):
         df = self._items_df()
@@ -776,20 +785,48 @@ with tab_stock:
                             st.error(f"❌ 위치 변경 실패: {e}")
 
             st.info(
-                "💡 **셀을 탭하면 종류·품번·규격·위치·특기사항을 바로 수정**할 수 있습니다. "
+                "💡 **셀을 탭해서 값을 고치고 다른 칸으로 넘어가면(또는 Enter) 바로 저장**됩니다 — "
+                "따로 저장 버튼을 안 누르셔도 됩니다. "
                 "품번 맨 앞의 F는 안 쓰셔도 저장할 때 자동으로 붙습니다. "
                 "위치는 정확한 형식(A-01-01) 없이 구역·열·행을 순서대로 입력하시면 "
                 "자동으로 하이픈이 붙습니다 (예: `A 1 1`, `A,1,1`, `A-1-1` 모두 A-01-01로 저장됨). "
                 "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
                 "보통은 비워두시면 됩니다. "
-                "고치신 후 아래 [✏️ 변경사항 저장]을 눌러야 반영됩니다. "
-                "출고 예정으로 보낼 품번은 **[출고 선택]** 체크박스를 체크하세요."
+                "출고 예정으로 보낼 품번은 **[출고]**, 완전히 지울 품번은 **[삭제]** 체크박스를 체크한 뒤 아래 버튼을 눌러주세요."
             )
 
             stock_df_display = stock_df.reset_index(drop=True).copy()
             stock_df_display["출고 선택"] = False
+            stock_df_display["삭제 체크"] = False
 
             cat_options = sorted(set(db.get_categories()) | set(stock_df_display["종류"].unique().tolist()))
+
+            def _auto_save_stock_edits():
+                """종류/품번/규격/위치/특기사항 셀을 고치고 포커스를 벗어나는 즉시(별도 버튼 없이) 저장."""
+                editor_state = st.session_state.get("editor_stock", {})
+                edited_rows = editor_state.get("edited_rows", {})
+                if not edited_rows:
+                    return
+                field_cols = ["종류", "품번", "규격", "적재위치", "특기사항"]
+                successes, errors = [], []
+                for idx_str, changes in edited_rows.items():
+                    if not any(k in changes for k in field_cols):
+                        continue  # 출고 선택/삭제 체크만 바뀐 경우는 여기서 처리 안 함
+                    idx = int(idx_str)
+                    orig = stock_df_display.loc[idx]
+                    try:
+                        db.update_item(
+                            original_part_no=orig["품번"],
+                            new_part_no=changes.get("품번", orig["품번"]),
+                            category_name=changes.get("종류", orig["종류"]),
+                            spec=changes.get("규격", orig["규격"]),
+                            location_code=changes.get("적재위치", orig["적재위치"]),
+                            remarks=changes.get("특기사항", orig["특기사항"]),
+                        )
+                        successes.append(orig["품번"])
+                    except Exception as e:
+                        errors.append(f"[{orig['품번']}] {e}")
+                st.session_state["_stock_edit_feedback"] = (successes, errors)
 
             edited_df = st.data_editor(
                 stock_df_display,
@@ -804,52 +841,21 @@ with tab_stock:
                     "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
                     "특기사항": st.column_config.TextColumn("특기사항", width="small"),
                     "출고 선택": st.column_config.CheckboxColumn("출고", width="small", default=False),
+                    "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                 },
                 key="editor_stock",
+                on_change=_auto_save_stock_edits,
             )
 
-            col_save, col_move = st.columns(2)
+            _feedback = st.session_state.pop("_stock_edit_feedback", None)
+            if _feedback:
+                _successes, _errors = _feedback
+                if _successes:
+                    st.success(f"✅ 자동 저장됨: {', '.join(_successes)}")
+                for _err in _errors:
+                    st.error(f"❌ {_err}")
 
-            with col_save:
-                if st.button("✏️ 변경사항 저장", use_container_width=True):
-                    changed_rows = []
-                    for i in stock_df_display.index:
-                        orig = stock_df_display.loc[i]
-                        new = edited_df.loc[i]
-                        if (
-                            orig["종류"] != new["종류"]
-                            or orig["품번"] != new["품번"]
-                            or orig["규격"] != new["규격"]
-                            or orig["적재위치"] != new["적재위치"]
-                            or orig["특기사항"] != new["특기사항"]
-                        ):
-                            changed_rows.append((orig, new))
-
-                    if not changed_rows:
-                        st.info("변경된 내용이 없습니다.")
-                    else:
-                        errors = []
-                        success_count = 0
-                        for orig, new in changed_rows:
-                            try:
-                                db.update_item(
-                                    original_part_no=orig["품번"],
-                                    new_part_no=new["품번"],
-                                    category_name=new["종류"],
-                                    spec=new["규격"],
-                                    location_code=new["적재위치"],
-                                    remarks=new["특기사항"],
-                                )
-                                success_count += 1
-                            except Exception as e:
-                                errors.append(f"[{orig['품번']}] {e}")
-
-                        if success_count:
-                            st.success(f"✅ {success_count}건 수정 완료!")
-                        for err in errors:
-                            st.error(f"❌ {err}")
-                        if success_count:
-                            st.rerun()
+            col_move, col_del = st.columns(2)
 
             with col_move:
                 selected_parts = edited_df[edited_df["출고 선택"] == True]["품번"].tolist()
@@ -860,6 +866,27 @@ with tab_stock:
                         db.move_to_pending_dispatch(selected_parts)
                         st.success(f"✅ 총 {len(selected_parts)}건이 [출고예정내역]으로 이동되었습니다: {', '.join(selected_parts)}")
                         st.rerun()
+
+            with col_del:
+                delete_parts = edited_df[edited_df["삭제 체크"] == True]["품번"].tolist()
+                if st.button("🗑️ 선택 항목 삭제", use_container_width=True):
+                    if not delete_parts:
+                        st.warning("삭제할 품번을 1개 이상 선택해주세요.")
+                    else:
+                        del_errors = []
+                        del_success = []
+                        for p in delete_parts:
+                            try:
+                                db.delete_item(p)
+                                del_success.append(p)
+                            except Exception as e:
+                                del_errors.append(f"[{p}] {e}")
+                        if del_success:
+                            st.success(f"🗑️ 총 {len(del_success)}건 삭제 완료: {', '.join(del_success)}")
+                        for err in del_errors:
+                            st.error(f"❌ {err}")
+                        if del_success:
+                            st.rerun()
         else:
             render_html_table(stock_df)
     else:
@@ -962,7 +989,46 @@ with tab_history:
             use_container_width=True,
         )
         st.divider()
-        render_html_table(dispatched_df)
+
+        if not is_admin:
+            render_html_table(dispatched_df)
+        else:
+            st.info("💡 잘못 등록된 출고 건은 **[삭제]** 체크박스를 체크한 뒤 아래 버튼을 눌러 삭제할 수 있습니다.")
+
+            dispatched_df_display = dispatched_df.reset_index(drop=True).copy()
+            dispatched_df_display["삭제 체크"] = False
+
+            edited_dispatched_df = st.data_editor(
+                dispatched_df_display,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항"],
+                column_config={
+                    "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
+                },
+                key="editor_dispatched",
+            )
+
+            hist_delete_parts = edited_dispatched_df[edited_dispatched_df["삭제 체크"] == True]["품번"].tolist()
+
+            if st.button("🗑️ 선택 항목 삭제", use_container_width=True):
+                if not hist_delete_parts:
+                    st.warning("삭제할 품번을 1개 이상 선택해주세요.")
+                else:
+                    hd_errors = []
+                    hd_success = []
+                    for p in hist_delete_parts:
+                        try:
+                            db.delete_item(p)
+                            hd_success.append(p)
+                        except Exception as e:
+                            hd_errors.append(f"[{p}] {e}")
+                    if hd_success:
+                        st.success(f"🗑️ 총 {len(hd_success)}건 삭제 완료: {', '.join(hd_success)}")
+                    for err in hd_errors:
+                        st.error(f"❌ {err}")
+                    if hd_success:
+                        st.rerun()
     else:
         st.info("출고 처리된 내역이 없습니다.")
 
@@ -1025,4 +1091,5 @@ with tab_manage:
                         st.error(f"삭제 실패: {e}")
             else:
                 st.caption("등록된 배송지가 없습니다.")
+
 
