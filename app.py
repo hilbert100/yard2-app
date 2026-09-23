@@ -44,6 +44,16 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 LEVEL_ALIASES = {"상": "상", "상단": "상", "위": "상", "top": "상", "하": "하", "하단": "하", "아래": "하", "bottom": "하"}
 
 
+def strip_stray_quotes(s):
+    """엑셀 텍스트 서식용 작은따옴표(' / ')가 값 어디에 섞여 있든 제거."""
+    if not s:
+        return s
+    cleaned = str(s)
+    for q in ("'", "\u2019", "\u2018"):
+        cleaned = cleaned.replace(q, "")
+    return cleaned.strip()
+
+
 def normalize_part_no(raw):
     """품번 맨 앞의 고정 접두사 'F'를 자동으로 붙여준다.
     이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')"""
@@ -248,10 +258,11 @@ class SteelYardSheetDB:
         if not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다. (2단 적재라면 상/하를 다르게 지정해주세요)")
 
-        clean_spec = spec.strip().upper() if spec else ""
+        clean_spec = strip_stray_quotes(spec).upper() if spec else ""
+        clean_remarks = strip_stray_quotes(remarks) if remarks else ""
         self.ws_items.append_row([
             clean_part_no, category_name, clean_spec, loc_code, "IN_STOCK",
-            str(inbound_date), "", "", remarks or ""
+            str(inbound_date), "", "", clean_remarks
         ])
         _bump_cache_version()
 
@@ -291,10 +302,11 @@ class SteelYardSheetDB:
                 if loc_code in active_locations or loc_code in seen_locations:
                     raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
-                clean_spec = (r.get("spec") or "").strip().upper()
+                clean_spec = strip_stray_quotes(r.get("spec")).upper() if r.get("spec") else ""
+                clean_remarks = strip_stray_quotes(r.get("remarks")) if r.get("remarks") else ""
                 new_sheet_rows.append([
                     clean_part_no, category_name, clean_spec, loc_code, "IN_STOCK",
-                    str(r["inbound_date"]), "", "", r.get("remarks") or ""
+                    str(r["inbound_date"]), "", "", clean_remarks
                 ])
                 seen_parts.add(clean_part_no)
                 seen_locations.add(loc_code)
@@ -414,8 +426,8 @@ class SteelYardSheetDB:
         if not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
-        clean_spec = (spec or "").strip().upper()
-        clean_remarks = remarks or ""
+        clean_spec = strip_stray_quotes(spec).upper() if spec else ""
+        clean_remarks = strip_stray_quotes(remarks) if remarks else ""
 
         # 품번(A)~위치(D), 특기사항(I) 갱신
         self.ws_items.update(
@@ -779,7 +791,11 @@ with tab_in:
                                 return ""
                             # 엑셀에서 텍스트 서식용으로 붙인 작은따옴표(' / ')가
                             # 값 앞에 그대로 섞여 들어오는 경우가 있어 제거
-                            return str(val).strip().lstrip("'\u2019\u2018")
+                            # 엑셀 텍스트 서식용 작은따옴표(' / ')가 값 안 어디에 있든(맨 앞/중간/뒤) 제거
+                            cleaned = str(val).strip()
+                            for q in ("'", "\u2019", "\u2018"):
+                                cleaned = cleaned.replace(q, "")
+                            return cleaned.strip()
 
                         cat = g("종류")
                         p1, p2, p3, p4 = g("품번1단"), g("품번2단"), g("품번3단"), g("품번4단")
