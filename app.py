@@ -408,6 +408,11 @@ class SteelYardSheetDB:
         for p in part_numbers:
             row_idx = self._find_item_row(p)
             if row_idx:
+                # 이관 예정이었다가 보류되는 경우, 특기사항에 붙었던 '★이관' 표시 제거
+                current_remarks = self.ws_items.cell(row_idx, ITEMS_COL["특기사항"]).value or ""
+                if "★이관" in current_remarks:
+                    cleaned = current_remarks.replace("★이관 / ", "").replace("★이관", "").strip()
+                    self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], cleaned)
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "IN_STOCK")
         _bump_cache_version()
 
