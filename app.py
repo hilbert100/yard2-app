@@ -48,6 +48,8 @@ def normalize_part_no(raw):
     """품번 맨 앞의 고정 접두사 'F'를 자동으로 붙여준다.
     이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')"""
     s = (raw or "").strip().upper()
+    # 엑셀 텍스트 서식용 작은따옴표(' / ')가 값에 섞여 들어온 경우 제거
+    s = s.replace("'", "").replace("\u2019", "").replace("\u2018", "")
     if not s:
         return s
     if not s.startswith("F"):
@@ -745,7 +747,11 @@ with tab_in:
 
                         def g(col):
                             val = row.get(col)
-                            return "" if pd.isna(val) else str(val).strip()
+                            if pd.isna(val):
+                                return ""
+                            # 엑셀에서 텍스트 서식용으로 붙인 작은따옴표(' / ')가
+                            # 값 앞에 그대로 섞여 들어오는 경우가 있어 제거
+                            return str(val).strip().lstrip("'\u2019\u2018")
 
                         cat = g("종류")
                         p1, p2, p3, p4 = g("품번1단"), g("품번2단"), g("품번3단"), g("품번4단")
