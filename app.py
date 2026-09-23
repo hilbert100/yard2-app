@@ -669,19 +669,23 @@ st.markdown("""
     justify-content: center !important;
     text-align: center !important;
 }
-/* 구역도 지도 축소판 + "제2야적장 구역식별Map" 라벨을 같은 폭으로 정중앙 정렬 */
-[data-testid="stImage"] {
-    display: flex;
-    justify-content: center;
+/* 구역도 지도 축소판 + "제2야적장 구역식별Map" 라벨을 정확히 같은 중심선에 정렬 */
+[data-testid="stImage"] img {
+    display: block;
+    margin: 0 auto;
 }
 [data-testid="stPopover"] {
-    display: flex;
-    justify-content: center;
+    width: 100%;
+}
+[data-testid="stPopover"] button {
+    display: block;
+    margin: 0 auto !important;
 }
 [data-testid="stPopover"] button p {
     text-decoration: underline;
     font-size: 11px !important;
     white-space: nowrap;
+    text-align: center;
 }
 </style>
 """, unsafe_allow_html=True)
