@@ -869,7 +869,7 @@ with tab_stock:
 
             with col_del:
                 delete_parts = edited_df[edited_df["삭제 체크"] == True]["품번"].tolist()
-                if st.button("🗑️ 선택 항목 삭제", use_container_width=True):
+                if st.button("🗑️ 선택 항목 삭제", use_container_width=True, key="delete_stock_btn"):
                     if not delete_parts:
                         st.warning("삭제할 품번을 1개 이상 선택해주세요.")
                     else:
@@ -1011,7 +1011,7 @@ with tab_history:
 
             hist_delete_parts = edited_dispatched_df[edited_dispatched_df["삭제 체크"] == True]["품번"].tolist()
 
-            if st.button("🗑️ 선택 항목 삭제", use_container_width=True):
+            if st.button("🗑️ 선택 항목 삭제", use_container_width=True, key="delete_dispatched_btn"):
                 if not hist_delete_parts:
                     st.warning("삭제할 품번을 1개 이상 선택해주세요.")
                 else:
@@ -1091,5 +1091,6 @@ with tab_manage:
                         st.error(f"삭제 실패: {e}")
             else:
                 st.caption("등록된 배송지가 없습니다.")
+
 
 
