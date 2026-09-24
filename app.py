@@ -725,15 +725,7 @@ with map_col:
     pop_l, pop_m, pop_r = st.columns([1, 3, 1])
     with pop_m:
         with st.popover("구역식별Map", use_container_width=False, width=700):
-            st.markdown(
-                f"""
-                <div style="overflow-x:auto; -webkit-overflow-scrolling:touch; width:100%;">
-                    <img src="data:image/jpeg;base64,{YARD_MAP_B64}"
-                         style="width:900px; max-width:none; display:block; border-radius:6px;" />
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", use_container_width=True)
 
 with flow_col:
     st.markdown('<div style="height:110px; display:flex; align-items:flex-end; justify-content:center; '
@@ -742,15 +734,7 @@ with flow_col:
     wf_l, wf_m, wf_r = st.columns([1, 3, 1])
     with wf_m:
         with st.popover("입출고 흐름도", use_container_width=False, width=700):
-            st.markdown(
-                f"""
-                <div style="overflow-x:auto; -webkit-overflow-scrolling:touch; width:100%;">
-                    <img src="data:image/jpeg;base64,{WORKFLOW_CHART_B64}"
-                         style="width:1300px; max-width:none; display:block; border-radius:6px;" />
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.image(f"data:image/jpeg;base64,{WORKFLOW_CHART_B64}", use_container_width=True)
 
 try:
     ADMIN_PIN = st.secrets["admin_pin"]
