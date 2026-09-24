@@ -694,25 +694,23 @@ title_col, map_col, flow_col = st.columns([5, 1, 1])
 with title_col:
     st.markdown(
         f"""
-        <div style="background-color:#EDEFF2; border-radius:10px; padding:10px 16px;
-                    margin:0 0 12px 0; display:flex; align-items:stretch; justify-content:space-between;
-                    gap:12px; overflow:hidden;">
-            <div style="display:flex; flex-direction:column; justify-content:center; gap:3px;
-                        overflow:hidden; min-width:0;">
+        <div style="position:relative; overflow:hidden; background-color:#EDEFF2;
+                    border-radius:10px; padding:12px 16px; margin:0 0 12px 0;">
+            <img src="data:image/jpeg;base64,{TRUCK_PHOTO_B64}"
+                 style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+                        object-position:center 55%; opacity:0.28; pointer-events:none;" />
+            <div style="position:relative; z-index:1;">
                 <h1 style="font-size:clamp(15px, 5vw, 26px); text-overflow:ellipsis;
                            overflow:hidden; white-space:nowrap; margin:0;">
                     제2야적장 입출고 관리
                 </h1>
-                <div style="height:1px; background-color:#AEBBD6; width:100%; margin:3px 0;"></div>
+                <div style="height:1px; background-color:#AEBBD6; width:100%; margin:4px 0;"></div>
                 <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
                              font-size:clamp(12px, 3vw, 15px); font-weight:700;
                              color:#1B3A6B;">
                     서진로지스(주)
                 </span>
             </div>
-            <img src="data:image/jpeg;base64,{TRUCK_PHOTO_B64}"
-                 style="height:100%; width:auto; object-fit:cover;
-                        border-radius:6px; flex-shrink:0;" />
         </div>
         """,
         unsafe_allow_html=True,
