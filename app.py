@@ -683,7 +683,8 @@ st.markdown("""
 /* "제2야적장 구역식별Map" 팝오버 라벨에 밑줄 (위치 정렬은 컬럼 레이아웃으로 처리) */
 [data-testid="stPopover"] button p {
     text-decoration: underline;
-    font-size: 11px !important;
+    font-size: 13px !important;
+    font-weight: 600;
     white-space: nowrap;
 }
 </style>
@@ -732,8 +733,7 @@ with flow_col:
                 '<span style="font-size:36px; color:#1B3A6B;">➜</span></div>', unsafe_allow_html=True)
     wf_l, wf_m, wf_r = st.columns([1, 3, 1])
     with wf_m:
-        with st.popover("WORK FLOW", use_container_width=False):
-            st.markdown("**입출고 흐름도**")
+        with st.popover("입출고 흐름도", use_container_width=False):
             st.image(f"data:image/jpeg;base64,{WORKFLOW_CHART_B64}", use_container_width=True)
 
 try:
