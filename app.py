@@ -695,19 +695,21 @@ with title_col:
     st.markdown(
         f"""
         <div style="background-color:#EDEFF2; border-radius:10px; padding:12px 16px;
-                    margin:0 0 12px 0; display:flex; align-items:center; gap:10px;
-                    white-space:nowrap; overflow:hidden;">
-            <h1 style="font-size:clamp(15px, 5vw, 26px); text-overflow:ellipsis;
-                       overflow:hidden; margin:0;">
-                제2야적장 입출고 관리
-            </h1>
-            <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
-                         font-size:clamp(13px, 3.4vw, 17px); font-weight:700;
-                         color:#1B3A6B; flex-shrink:0;">
-                서진로지스(주)
-            </span>
+                    margin:0 0 12px 0; display:flex; align-items:center; justify-content:space-between;
+                    gap:12px; overflow:hidden;">
+            <div style="display:flex; flex-direction:column; gap:3px; overflow:hidden; min-width:0;">
+                <h1 style="font-size:clamp(15px, 5vw, 26px); text-overflow:ellipsis;
+                           overflow:hidden; white-space:nowrap; margin:0;">
+                    제2야적장 입출고 관리
+                </h1>
+                <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
+                             font-size:clamp(12px, 3vw, 15px); font-weight:700;
+                             color:#1B3A6B;">
+                    서진로지스(주)
+                </span>
+            </div>
             <img src="data:image/jpeg;base64,{TRUCK_PHOTO_B64}"
-                 style="height:32px; width:auto; border-radius:4px; flex-shrink:0;" />
+                 style="height:64px; width:auto; border-radius:6px; flex-shrink:0;" />
         </div>
         """,
         unsafe_allow_html=True,
@@ -726,7 +728,7 @@ with map_col:
 
 with flow_col:
     st.markdown('<div style="height:110px; display:flex; align-items:center; justify-content:center;">'
-                '<span style="font-size:28px;">📊</span></div>', unsafe_allow_html=True)
+                '<span style="font-size:36px; color:#1B3A6B;">➜</span></div>', unsafe_allow_html=True)
     wf_l, wf_m, wf_r = st.columns([1, 3, 1])
     with wf_m:
         with st.popover("WORK FLOW", use_container_width=False):
