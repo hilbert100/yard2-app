@@ -694,14 +694,16 @@ title_col, map_col, flow_col = st.columns([5, 1, 1])
 with title_col:
     st.markdown(
         f"""
-        <div style="background-color:#EDEFF2; border-radius:10px; padding:12px 16px;
-                    margin:0 0 12px 0; display:flex; align-items:center; justify-content:space-between;
+        <div style="background-color:#EDEFF2; border-radius:10px; padding:10px 16px;
+                    margin:0 0 12px 0; display:flex; align-items:stretch; justify-content:space-between;
                     gap:12px; overflow:hidden;">
-            <div style="display:flex; flex-direction:column; gap:3px; overflow:hidden; min-width:0;">
+            <div style="display:flex; flex-direction:column; justify-content:center; gap:3px;
+                        overflow:hidden; min-width:0;">
                 <h1 style="font-size:clamp(15px, 5vw, 26px); text-overflow:ellipsis;
                            overflow:hidden; white-space:nowrap; margin:0;">
                     제2야적장 입출고 관리
                 </h1>
+                <div style="height:1px; background-color:#AEBBD6; width:100%; margin:3px 0;"></div>
                 <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
                              font-size:clamp(12px, 3vw, 15px); font-weight:700;
                              color:#1B3A6B;">
@@ -709,7 +711,8 @@ with title_col:
                 </span>
             </div>
             <img src="data:image/jpeg;base64,{TRUCK_PHOTO_B64}"
-                 style="height:64px; width:auto; border-radius:6px; flex-shrink:0;" />
+                 style="height:100%; width:auto; object-fit:cover;
+                        border-radius:6px; flex-shrink:0;" />
         </div>
         """,
         unsafe_allow_html=True,
