@@ -705,7 +705,7 @@ with title_col:
                            overflow:hidden; white-space:nowrap; margin:0;">
                     제2야적장 입출고 관리
                 </h1>
-                <div style="height:1px; background-color:#AEBBD6; width:100%; margin:4px 0;"></div>
+                <div style="height:1px; background-color:#5A73A8; width:100%; margin:4px 0;"></div>
                 <span style="font-family:'Pretendard','Noto Sans KR',sans-serif;
                              font-size:clamp(12px, 3vw, 15px); font-weight:700;
                              color:#1B3A6B;">
@@ -729,11 +729,12 @@ with map_col:
             st.image(f"data:image/jpeg;base64,{YARD_MAP_B64}", use_container_width=True)
 
 with flow_col:
-    st.markdown('<div style="height:110px; display:flex; align-items:center; justify-content:center;">'
-                '<span style="font-size:36px; color:#1B3A6B;">➜</span></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:110px; display:flex; align-items:flex-end; justify-content:center; '
+                'padding-bottom:2px;">'
+                '<span style="font-size:36px; color:#1B3A6B; line-height:1;">➜</span></div>', unsafe_allow_html=True)
     wf_l, wf_m, wf_r = st.columns([1, 3, 1])
     with wf_m:
-        with st.popover("입출고 흐름도", use_container_width=False):
+        with st.popover("입출고 흐름도", use_container_width=False, width=700):
             st.image(f"data:image/jpeg;base64,{WORKFLOW_CHART_B64}", use_container_width=True)
 
 try:
