@@ -504,7 +504,7 @@ class SteelYardSheetDB:
         _bump_cache_version()
 
     # ---------------- 조회 ----------------
-    def search_current_stock(self, category_name="전체", part_kw="", spec_kw=""):
+    def search_current_stock(self, category_name="전체", part_kw="", spec_kw="", start_date=None, end_date=None):
         df = self._items_df()
         cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항"]
         if df.empty:
@@ -517,6 +517,13 @@ class SteelYardSheetDB:
             df = df[df["품번"].str.contains(part_kw.strip().upper(), na=False, regex=False)]
         if spec_kw:
             df = df[df["규격"].str.contains(spec_kw.strip().upper(), na=False, regex=False)]
+        if (start_date or end_date) and not df.empty:
+            parsed = pd.to_datetime(df["입고일"], errors="coerce")
+            if start_date:
+                df = df[parsed >= pd.Timestamp(start_date)]
+                parsed = pd.to_datetime(df["입고일"], errors="coerce")
+            if end_date:
+                df = df[parsed <= pd.Timestamp(end_date)]
 
         df = df.rename(columns={"위치": "적재위치"})
         if df.empty:
@@ -951,7 +958,14 @@ with tab_stock:
     sel_part = sf_col2.text_input("● 품번 검색", placeholder="예: FA-3B 또는 01")
     sel_spec = sf_col3.text_input("● 규격 검색", placeholder="예: 12T 또는 1500")
 
-    stock_df = db.search_current_stock(category_name=sel_cat, part_kw=sel_part, spec_kw=sel_spec)
+    sf_col4, sf_col5 = st.columns(2)
+    stock_start_date = sf_col4.date_input("● 입고일 시작", value=None, key="stock_start_date")
+    stock_end_date = sf_col5.date_input("● 입고일 종료", value=None, key="stock_end_date")
+
+    stock_df = db.search_current_stock(
+        category_name=sel_cat, part_kw=sel_part, spec_kw=sel_spec,
+        start_date=stock_start_date, end_date=stock_end_date,
+    )
     st.metric("조회된 재고 수량", f"{len(stock_df)}건")
 
     if not stock_df.empty:
