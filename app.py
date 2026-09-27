@@ -1299,8 +1299,8 @@ with tab_manage:
         col_cat, col_dest = st.columns(2)
 
         with col_cat:
-            st.markdown("##### 🏷️ 강판 종류 추가")
-            new_cat = st.text_input("신규 강판 종류", placeholder="예: 도금강판", key="new_cat_input")
+            st.markdown("##### 🏷️ 부재 종류 추가")
+            new_cat = st.text_input("신규 부재 종류", placeholder="예: 도금강판", key="new_cat_input")
             if st.button("종류 추가", use_container_width=True):
                 if new_cat:
                     try:
@@ -1310,7 +1310,7 @@ with tab_manage:
                     except Exception as e:
                         st.error(f"추가 실패: {e}")
 
-            st.markdown("##### 🗑️ 강판 종류 삭제")
+            st.markdown("##### 🗑️ 부재 종류 삭제")
             existing_cats = db.get_categories()
             if existing_cats:
                 cat_to_delete = st.selectbox("삭제할 종류 선택", existing_cats, key="del_cat_select")
