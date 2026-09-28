@@ -5,6 +5,7 @@ from datetime import datetime
 import gspread
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -49,6 +50,11 @@ STATUS_LABEL = {
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# 적재위치 중복 허용 스위치
+#   True  = 초기 정리 기간: 같은 위치에 여러 품목이 있어도 저장 허용 (재고현황에서 하늘색으로 표시)
+#   False = 위치 확정 후: 이미 쓰고 있는 위치로는 입고/이동/수정 불가 (원래 방식)
+ALLOW_DUPLICATE_LOCATION = True
+
 
 LEVEL_ALIASES = {"상": "상", "상단": "상", "위": "상", "top": "상", "하": "하", "하단": "하", "아래": "하", "bottom": "하"}
 
@@ -64,6 +70,28 @@ def strip_stray_quotes(s):
     for q in STRAY_QUOTE_CHARS:
         cleaned = cleaned.replace(q, "")
     return cleaned.strip()
+
+
+def category_sort_key(name):
+    """품목 종류 정렬: 한글(가나다순) 먼저, 그다음 영어(알파벳순, 대소문자 무시), 나머지는 맨 뒤."""
+    s = str(name).strip()
+    first = s[:1]
+    if "가" <= first <= "힣" or "ㄱ" <= first <= "ㅣ":
+        group = 0
+    elif first.isascii() and first.isalpha():
+        group = 1
+    else:
+        group = 2
+    return (group, s.lower())
+
+
+def select_nokb(container, label, options, **kwargs):
+    """풀다운 메뉴를 눌러도 모바일 키보드가 올라오지 않는 selectbox (검색 입력 끔).
+    Streamlit 버전이 낮아 filter_mode를 모르면 일반 selectbox로 동작."""
+    try:
+        return container.selectbox(label, options, filter_mode=None, **kwargs)
+    except TypeError:
+        return container.selectbox(label, options, **kwargs)
 
 
 def normalize_part_no(raw):
@@ -97,12 +125,21 @@ LOCATION_INPUT_RE = re.compile(
 )
 
 
+# 구분자 없이 붙여 쓴 입력: 구역 + 열 2자리 + 행 2자리 (+ 선택적으로 상/하)
+#   예) b0209 -> B-02-09,  B0209상 -> B-02-09-상
+LOCATION_COMPACT_RE = re.compile(
+    r"^\s*([A-Za-z가-힣]+)\s*(\d{2})(\d{2})\s*(상단|하단|상|하|위|아래|top|bottom)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def normalize_location_input(raw):
     """'A-01-01' 처럼 정확한 형식이 아니어도, 구역/열/행(+선택적으로 상/하 층)을
-    공백·쉼표·슬래시·하이픈 아무 구분자로나 입력하면 자동 변환. 파싱 실패 시 None."""
+    공백·쉼표·슬래시·하이픈 아무 구분자로나 입력하거나, 'b0209'처럼 붙여 써도 자동 변환.
+    파싱 실패 시 None."""
     if not raw:
         return None
-    m = LOCATION_INPUT_RE.match(str(raw))
+    m = LOCATION_INPUT_RE.match(str(raw)) or LOCATION_COMPACT_RE.match(str(raw))
     if not m:
         return None
     zone, row, col, level = m.groups()
@@ -160,17 +197,20 @@ def _cache_version():
 def _bump_cache_version():
     """쓰기 작업 후 호출 — 캐시된 읽기 결과를 무효화해서 다음 조회에 최신값이 반영되게 함."""
     st.session_state["_sheet_cache_version"] = _cache_version() + 1
+    # 공용 캐시를 즉시 비워서, 이동/수정 직후 화면(재고현황 카운트 등)에 바로 반영되게 함
+    _cached_all_records.clear()
+    _cached_col_values.clear()
 
 
 @st.cache_data(ttl=8, show_spinner=False)
-def _cached_all_records(sheet_name, _version):
+def _cached_all_records(sheet_name, version):
     ss = get_spreadsheet()
     ws = ss.worksheet(sheet_name)
     return ws.get_all_records()
 
 
 @st.cache_data(ttl=8, show_spinner=False)
-def _cached_col_values(sheet_name, col, _version):
+def _cached_col_values(sheet_name, col, version):
     ss = get_spreadsheet()
     ws = ss.worksheet(sheet_name)
     return ws.col_values(col)
@@ -186,7 +226,7 @@ class SteelYardSheetDB:
     # ---------------- Master 정보 (짧게 캐싱해서 반복 조회 시 API 호출 절약) ----------------
     def get_categories(self):
         vals = _cached_col_values("Categories", 1, _cache_version())
-        return [v.strip() for v in vals[1:] if v.strip()]
+        return sorted({v.strip() for v in vals[1:] if v.strip()}, key=category_sort_key)
 
     def add_category(self, name):
         name = name.strip()
@@ -267,7 +307,7 @@ class SteelYardSheetDB:
 
         df = self._items_df()
         active = df[df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])] if not df.empty else df
-        if not active.empty and (active["위치"] == loc_code).any():
+        if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다. (2단 적재라면 상/하를 다르게 지정해주세요)")
 
         clean_spec = strip_stray_quotes(spec).upper() if spec else ""
@@ -311,7 +351,7 @@ class SteelYardSheetDB:
                     raise ValueError(f"[{category_name}] 는 등록되지 않은 종류입니다. Master 관리에서 먼저 추가해주세요.")
 
                 loc_code = format_location_code(r["zone"], r["row"], r["col"], r.get("level", ""))
-                if loc_code in active_locations or loc_code in seen_locations:
+                if not ALLOW_DUPLICATE_LOCATION and (loc_code in active_locations or loc_code in seen_locations):
                     raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
                 clean_spec = strip_stray_quotes(r.get("spec")).upper() if r.get("spec") else ""
@@ -343,7 +383,7 @@ class SteelYardSheetDB:
 
         df = self._items_df()
         active = df[(df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])) & (df["품번"] != clean_part_no)]
-        if not active.empty and (active["위치"] == new_loc_code).any():
+        if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == new_loc_code).any():
             raise ValueError(f"[{new_loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
         self.ws_items.update_cell(row_idx, ITEMS_COL["위치"], new_loc_code)
@@ -422,6 +462,32 @@ class SteelYardSheetDB:
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "IN_STOCK")
         _bump_cache_version()
 
+    # ---------------- 출고/이관내역 보류 체크 -> 재고현황(IN_STOCK) 복원 ----------------
+    def restore_dispatched_to_in_stock(self, part_no):
+        """출고완료(DISPATCHED) 품목을 재고현황으로 되돌림.
+        출고일·배송지는 비우고, 특기사항에서 '★이관' 표시와 ' / [출고비고] ...' 부분을 제거.
+        적재위치와 입고일은 출고 전 값 그대로 유지. 출고 이력(DispatchLog)은 그대로 남김."""
+        row_idx = self._find_item_row(part_no)
+        if not row_idx:
+            raise ValueError("존재하지 않는 품번입니다.")
+
+        row_vals = self.ws_items.row_values(row_idx)
+        row_vals += [""] * (len(ITEMS_HEADERS) - len(row_vals))
+
+        remarks = row_vals[ITEMS_COL["특기사항"] - 1]
+        if " / [출고비고]" in remarks:
+            remarks = remarks.split(" / [출고비고]")[0]
+        remarks = remarks.replace("★이관 / ", "").replace("★이관", "").strip()
+
+        inbound_date_val = row_vals[ITEMS_COL["입고일"] - 1]
+
+        # 상태(E) ~ 특기사항(I)까지 한 번에 갱신
+        self.ws_items.update(
+            f"E{row_idx}:I{row_idx}",
+            [["IN_STOCK", inbound_date_val, "", "", remarks]]
+        )
+        _bump_cache_version()
+
     # ---------------- 재고현황 표에서 셀 직접 수정 ----------------
     def update_item(self, original_part_no, new_part_no, category_name, spec, location_code, remarks):
         """재고현황 표에서 종류/품번/규격/위치/특기사항을 한 번에 수정."""
@@ -453,7 +519,7 @@ class SteelYardSheetDB:
         active = df[
             (df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])) & (df["품번"] != original_part_no)
         ]
-        if not active.empty and (active["위치"] == loc_code).any():
+        if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
         clean_spec = strip_stray_quotes(spec).upper() if spec else ""
@@ -466,6 +532,7 @@ class SteelYardSheetDB:
         )
         self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], clean_remarks)
         _bump_cache_version()
+        return loc_code
 
     # ---------------- 유지보수: 기존 데이터에서 따옴표 등 잘못 섞인 문자 정리 ----------------
     def clean_stray_quotes(self):
@@ -697,6 +764,32 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# 풀다운 메뉴를 눌렀을 때 모바일 키보드가 뜨지 않도록 (표 안의 종류/배송지 풀다운 포함)
+components.html(
+    """
+    <script>
+    (function () {
+      const doc = window.parent.document;
+      const SEL = '[data-baseweb="select"] input, input[id^="react-select"], .gdg-overlay-editor input';
+      function apply() {
+        doc.querySelectorAll(SEL).forEach(function (el) {
+          if (el.getAttribute("inputmode") !== "none") {
+            el.setAttribute("inputmode", "none");
+            el.setAttribute("autocomplete", "off");
+          }
+        });
+      }
+      apply();
+      if (!window.parent.__nokbObserver) {
+        window.parent.__nokbObserver = new MutationObserver(apply);
+        window.parent.__nokbObserver.observe(doc.body, { childList: true, subtree: true });
+      }
+    })();
+    </script>
+    """,
+    height=0,
+)
+
 title_col, map_col, flow_col = st.columns([5, 1, 1])
 
 with title_col:
@@ -794,7 +887,7 @@ with tab_in:
                 st.error("등록된 강판 종류가 없습니다. Master 관리 탭에서 추가해 주세요.")
             else:
                 with col_cat:
-                    cat_name = st.selectbox("종류", categories)
+                    cat_name = select_nokb(st, "종류", categories)
 
                 with col_part:
                     st.markdown("**품번 (4단 분할, 4단은 없으면 비워두세요. 맨 앞 F는 자동으로 붙습니다)**")
@@ -813,7 +906,7 @@ with tab_in:
                     zone = z_col.text_input("구역", value="A", label_visibility="collapsed")
                     row_n = r_col.number_input("열", min_value=1, value=1, label_visibility="collapsed")
                     col_n = c_col.number_input("행", min_value=1, value=1, label_visibility="collapsed")
-                    level = lv_col.selectbox("층", ["", "상", "하"], label_visibility="collapsed")
+                    level = select_nokb(lv_col, "층", ["", "상", "하"], label_visibility="collapsed")
 
                 with col_date:
                     in_date = st.date_input("입고일", datetime.now())
@@ -954,7 +1047,7 @@ with tab_stock:
     sf_col1, sf_col2, sf_col3 = st.columns([1.5, 2, 2])
 
     cat_list = ["전체"] + db.get_categories()
-    sel_cat = sf_col1.selectbox("● 종류 선택", cat_list)
+    sel_cat = select_nokb(sf_col1, "● 종류 선택", cat_list)
     sel_part = sf_col2.text_input("● 품번 검색", placeholder="예: FA-3B 또는 01")
     sel_spec = sf_col3.text_input("● 규격 검색", placeholder="예: 12T 또는 1500")
 
@@ -983,11 +1076,11 @@ with tab_stock:
             with st.expander("🔄 [니구리 작업] 적재위치 수시 변경 (클릭)", expanded=False):
                 with st.form("loc_update_form", clear_on_submit=True):
                     u_col1, u_col2, u_col3, u_col4, u_col5 = st.columns([2.2, 1, 1, 1, 1])
-                    u_part = u_col1.selectbox("위치 변경 대상 품번", stock_df["품번"].tolist())
+                    u_part = select_nokb(u_col1, "위치 변경 대상 품번", stock_df["품번"].tolist())
                     u_zone = u_col2.text_input("신규 구역", value="A")
                     u_row = u_col3.number_input("신규 열", min_value=1, value=1)
                     u_col = u_col4.number_input("신규 행", min_value=1, value=1)
-                    u_level = u_col5.selectbox("층", ["", "상", "하"])
+                    u_level = select_nokb(u_col5, "층", ["", "상", "하"])
                     if st.form_submit_button("⚡ 적재위치 변경 저장", use_container_width=True):
                         try:
                             db.update_location(u_part, u_zone, u_row, u_col, u_level)
@@ -1003,6 +1096,7 @@ with tab_stock:
                 "품번 맨 앞의 F는 안 쓰셔도 저장할 때 자동으로 붙습니다. "
                 "위치는 정확한 형식(A-01-01) 없이 구역·열·행을 순서대로 입력하시면 "
                 "자동으로 하이픈이 붙습니다 (예: `A 1 1`, `A,1,1`, `A-1-1` 모두 A-01-01로 저장됨). "
+                "붙여서 `b0209`처럼 구역+열 2자리+행 2자리로 입력해도 B-02-09로 저장됩니다. "
                 "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
                 "보통은 비워두시면 됩니다. "
                 "출고 예정으로 보낼 품번은 **[출고]**, 특기사항에 ★이관 표시와 함께 출고예정으로 보낼 품번은 **[이관]**, "
@@ -1014,7 +1108,10 @@ with tab_stock:
             stock_df_display["이관 체크"] = False
             stock_df_display["삭제 체크"] = False
 
-            cat_options = sorted(set(db.get_categories()) | set(stock_df_display["종류"].unique().tolist()))
+            cat_options = sorted(
+                set(db.get_categories()) | set(stock_df_display["종류"].unique().tolist()),
+                key=category_sort_key,
+            )
 
             def _auto_save_stock_edits():
                 """종류/품번/규격/위치/특기사항 셀을 고치고 포커스를 벗어나는 즉시(별도 버튼 없이) 저장."""
@@ -1030,7 +1127,7 @@ with tab_stock:
                     idx = int(idx_str)
                     orig = stock_df_display.loc[idx]
                     try:
-                        db.update_item(
+                        saved_loc = db.update_item(
                             original_part_no=orig["품번"],
                             new_part_no=changes.get("품번", orig["품번"]),
                             category_name=changes.get("종류", orig["종류"]),
@@ -1038,7 +1135,10 @@ with tab_stock:
                             location_code=changes.get("적재위치", orig["적재위치"]),
                             remarks=changes.get("특기사항", orig["특기사항"]),
                         )
-                        successes.append(orig["품번"])
+                        if "적재위치" in changes:
+                            successes.append(f"{orig['품번']} → {saved_loc}")
+                        else:
+                            successes.append(orig["품번"])
                     except Exception as e:
                         errors.append(f"[{orig['품번']}] {e}")
                 st.session_state["_stock_edit_feedback"] = (successes, errors)
@@ -1205,7 +1305,7 @@ with tab_history:
     st.markdown("##### 🎯 조건별 검색")
     hf_col1, hf_col2 = st.columns([1.5, 2])
     hist_cat_list = ["전체"] + db.get_categories()
-    hist_sel_cat = hf_col1.selectbox("● 종류 선택", hist_cat_list, key="hist_cat_filter")
+    hist_sel_cat = select_nokb(hf_col1, "● 종류 선택", hist_cat_list, key="hist_cat_filter")
     hist_sel_part = hf_col2.text_input("● 품번 검색", placeholder="예: FA-3B 또는 011", key="hist_part_filter")
 
     hf_col3, hf_col4 = st.columns(2)
@@ -1234,9 +1334,13 @@ with tab_history:
         if not is_admin:
             render_html_table(dispatched_df)
         else:
-            st.info("💡 잘못 등록된 출고 건은 **[삭제]** 체크박스를 체크한 뒤 아래 버튼을 눌러 삭제할 수 있습니다.")
+            st.info(
+                "💡 출고를 취소하고 재고로 되돌릴 건은 **[보류]**, "
+                "잘못 등록된 출고 건은 **[삭제]** 체크박스를 체크한 뒤 아래 버튼을 눌러주세요."
+            )
 
             dispatched_df_display = dispatched_df.reset_index(drop=True).copy()
+            dispatched_df_display["보류 체크"] = False
             dispatched_df_display["삭제 체크"] = False
 
             edited_dispatched_df = st.data_editor(
@@ -1245,31 +1349,58 @@ with tab_history:
                 hide_index=True,
                 disabled=["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항"],
                 column_config={
+                    "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                     "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                 },
                 key="editor_dispatched",
             )
 
-            hist_delete_parts = edited_dispatched_df[edited_dispatched_df["삭제 체크"] == True]["품번"].tolist()
+            hist_hold_parts = edited_dispatched_df[edited_dispatched_df["보류 체크"] == True]["품번"].tolist()
+            hist_delete_parts = edited_dispatched_df[
+                (edited_dispatched_df["삭제 체크"] == True) & (edited_dispatched_df["보류 체크"] == False)
+            ]["품번"].tolist()
 
-            if st.button("🗑️ 선택 항목 삭제", use_container_width=True, key="delete_dispatched_btn"):
-                if not hist_delete_parts:
-                    st.warning("삭제할 품번을 1개 이상 선택해주세요.")
-                else:
-                    hd_errors = []
-                    hd_success = []
-                    for p in hist_delete_parts:
-                        try:
-                            db.delete_item(p)
-                            hd_success.append(p)
-                        except Exception as e:
-                            hd_errors.append(f"[{p}] {e}")
-                    if hd_success:
-                        st.success(f"🗑️ 총 {len(hd_success)}건 삭제 완료: {', '.join(hd_success)}")
-                    for err in hd_errors:
-                        st.error(f"❌ {err}")
-                    if hd_success:
-                        st.rerun()
+            hcol_hold, hcol_del = st.columns(2)
+
+            with hcol_hold:
+                if st.button("↩️ 선택 항목 재고로 복원", type="primary", use_container_width=True, key="hold_dispatched_btn"):
+                    if not hist_hold_parts:
+                        st.warning("재고로 되돌릴 품번을 1개 이상 선택해주세요.")
+                    else:
+                        hh_errors = []
+                        hh_success = []
+                        for p in hist_hold_parts:
+                            try:
+                                db.restore_dispatched_to_in_stock(p)
+                                hh_success.append(p)
+                            except Exception as e:
+                                hh_errors.append(f"[{p}] {e}")
+                        if hh_success:
+                            st.success(f"↩️ 총 {len(hh_success)}건 보류 → [실시간 재고현황]으로 복원되었습니다: {', '.join(hh_success)}")
+                        for err in hh_errors:
+                            st.error(f"❌ {err}")
+                        if hh_success:
+                            st.rerun()
+
+            with hcol_del:
+                if st.button("🗑️ 선택 항목 삭제", use_container_width=True, key="delete_dispatched_btn"):
+                    if not hist_delete_parts:
+                        st.warning("삭제할 품번을 1개 이상 선택해주세요.")
+                    else:
+                        hd_errors = []
+                        hd_success = []
+                        for p in hist_delete_parts:
+                            try:
+                                db.delete_item(p)
+                                hd_success.append(p)
+                            except Exception as e:
+                                hd_errors.append(f"[{p}] {e}")
+                        if hd_success:
+                            st.success(f"🗑️ 총 {len(hd_success)}건 삭제 완료: {', '.join(hd_success)}")
+                        for err in hd_errors:
+                            st.error(f"❌ {err}")
+                        if hd_success:
+                            st.rerun()
     else:
         st.info("출고 처리된 내역이 없습니다.")
 
@@ -1313,7 +1444,7 @@ with tab_manage:
             st.markdown("##### 🗑️ 부재 종류 삭제")
             existing_cats = db.get_categories()
             if existing_cats:
-                cat_to_delete = st.selectbox("삭제할 종류 선택", existing_cats, key="del_cat_select")
+                cat_to_delete = select_nokb(st, "삭제할 종류 선택", existing_cats, key="del_cat_select")
                 if st.button("종류 삭제", use_container_width=True):
                     try:
                         db.delete_category(cat_to_delete)
@@ -1339,7 +1470,7 @@ with tab_manage:
             st.markdown("##### 🗑️ 배송지 삭제")
             existing_dests = db.get_destinations()
             if existing_dests:
-                dest_to_delete = st.selectbox("삭제할 배송지 선택", existing_dests, key="del_dest_select")
+                dest_to_delete = select_nokb(st, "삭제할 배송지 선택", existing_dests, key="del_dest_select")
                 if st.button("배송지 삭제", use_container_width=True):
                     try:
                         db.delete_destination(dest_to_delete)
