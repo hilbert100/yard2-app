@@ -133,6 +133,26 @@ LOCATION_COMPACT_RE = re.compile(
 )
 
 
+def parse_location_parts(raw):
+    """입력 위치를 (구역, 열, 행, 층)으로 분해. 'a0307', 'A 3 7', 'a-03-07-상' 등 모두 허용. 실패 시 None."""
+    if not raw:
+        return None
+    m = LOCATION_INPUT_RE.match(str(raw)) or LOCATION_COMPACT_RE.match(str(raw))
+    if not m:
+        return None
+    zone, row, col, level = m.groups()
+    return zone.strip().upper(), int(row), int(col), (level or "")
+
+
+def parse_part_no_input(raw):
+    """띄어쓰기(또는 하이픈·쉼표)로 구분한 품번을 하이픈으로 연결.
+    'b2 2b 004 3' -> 'FB2-2B-004-3' (4단은 없어도 됨). 형식이 맞지 않으면 None."""
+    tokens = [t for t in re.split(r"[\s,\-/]+", strip_stray_quotes(raw or "").strip()) if t]
+    if not 3 <= len(tokens) <= 4:
+        return None
+    return normalize_part_no("-".join(tokens).upper())
+
+
 def normalize_location_input(raw):
     """'A-01-01' 처럼 정확한 형식이 아니어도, 구역/열/행(+선택적으로 상/하 층)을
     공백·쉼표·슬래시·하이픈 아무 구분자로나 입력하거나, 'b0209'처럼 붙여 써도 자동 변환.
@@ -880,7 +900,7 @@ with tab_in:
     else:
         st.subheader("📥 현장 즉시 입고 등록")
         with st.form("realtime_in_form", clear_on_submit=True):
-            col_cat, col_part, col_spec, col_loc, col_date, col_rem = st.columns([1.5, 3.5, 2, 2.5, 1.5, 2])
+            col_cat, col_part, col_spec, col_loc, col_date, col_rem = st.columns([1.5, 2.5, 2, 1.8, 1.5, 2])
 
             categories = db.get_categories()
             if not categories:
@@ -890,23 +910,23 @@ with tab_in:
                     cat_name = select_nokb(st, "종류", categories)
 
                 with col_part:
-                    st.markdown("**품번 (4단 분할, 4단은 없으면 비워두세요. 맨 앞 F는 자동으로 붙습니다)**")
-                    p1, p2, p3, p4 = st.columns(4)
-                    part_1 = p1.text_input("1단", placeholder="B2", label_visibility="collapsed")
-                    part_2 = p2.text_input("2단", placeholder="2B", label_visibility="collapsed")
-                    part_3 = p3.text_input("3단", placeholder="004", label_visibility="collapsed")
-                    part_4 = p4.text_input("4단", placeholder="3", label_visibility="collapsed")
+                    part_raw = st.text_input(
+                        "품번 (띄어쓰기로 구분, F 자동)",
+                        placeholder="예: b2 2b 004 3",
+                        help="단 사이를 띄어 쓰면 하이픈으로 연결되고 맨 앞에 F가 붙습니다. "
+                             "b2 2b 004 3 → FB2-2B-004-3 (4단은 없으면 생략)",
+                    )
 
                 with col_spec:
                     spec = st.text_input("규격", placeholder="예: 12T x 1500 x 6000")
 
                 with col_loc:
-                    st.markdown("**적재위치 (2단 적재 시 층 선택)**")
-                    z_col, r_col, c_col, lv_col = st.columns(4)
-                    zone = z_col.text_input("구역", value="A", label_visibility="collapsed")
-                    row_n = r_col.number_input("열", min_value=1, value=1, label_visibility="collapsed")
-                    col_n = c_col.number_input("행", min_value=1, value=1, label_visibility="collapsed")
-                    level = select_nokb(lv_col, "층", ["", "상", "하"], label_visibility="collapsed")
+                    loc_raw = st.text_input(
+                        "적재위치",
+                        placeholder="예: a0307",
+                        help="구역+열 2자리+행 2자리로 붙여 쓰면 됩니다. a0307 → A-03-07. "
+                             "2단 적재는 뒤에 상/하 (예: a0307상)",
+                    )
 
                 with col_date:
                     in_date = st.date_input("입고일", datetime.now())
@@ -917,20 +937,26 @@ with tab_in:
                 st.divider()
 
                 if st.form_submit_button("⚡ 실시간 입고 등록", use_container_width=True):
-                    # 품번 1~3단은 필수, 4단(맨 끝자리)은 없는 품번도 있어서 비워도 됨
-                    part_components = [p.strip() for p in [part_1, part_2, part_3, part_4] if p.strip()]
-                    if not (part_1.strip() and part_2.strip() and part_3.strip()):
-                        st.error("품번 1~3단을 입력해주세요. (4단은 비워도 됩니다)")
+                    full_part_no = parse_part_no_input(part_raw)
+                    loc_parts = parse_location_parts(loc_raw)
+                    if not full_part_no:
+                        st.error("품번을 확인해주세요. 단 사이를 띄어서 3~4단으로 입력합니다 (예: b2 2b 004 3).")
+                    elif not loc_parts:
+                        st.error("적재위치를 확인해주세요. 구역+열 2자리+행 2자리로 입력합니다 (예: a0307).")
                     else:
-                        full_part_no = "-".join(part_components).upper()
+                        zone, row_n, col_n, level = loc_parts
                         try:
                             db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks, level)
-                            saved_part_no = normalize_part_no(full_part_no)
                             saved_loc = format_location_code(zone, row_n, col_n, level)
-                            st.success(f"✅ [{saved_part_no}] 입고 등록 완료! (위치: {saved_loc})")
+                            # rerun 후에도 결과가 보이도록 저장해 두었다가 아래에서 표시
+                            st.session_state["_inbound_msg"] = f"✅ [{full_part_no}] 입고 등록 완료! (위치: {saved_loc})"
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 등록 실패: {e}")
+
+        _inbound_msg = st.session_state.pop("_inbound_msg", None)
+        if _inbound_msg:
+            st.success(_inbound_msg)
 
         st.divider()
         st.subheader("📤 엑셀 일괄 업로드")
