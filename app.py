@@ -55,6 +55,12 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 #   False = 위치 확정 후: 이미 쓰고 있는 위치로는 입고/이동/수정 불가 (원래 방식)
 ALLOW_DUPLICATE_LOCATION = True
 
+# 위치 밀어내기: 이미 품목이 있는 위치(예: D-02-01)에 다른 품목을 넣으면
+# 같은 구역·열의 기존 품목들을 한 칸씩 뒤로 민다 (D-02-01→D-02-02, D-02-02→D-02-03 ...).
+# 중간에 빈 번호가 나오면 거기서 멈춤. 상/하가 붙은 2단 적재 위치는 대상 아님.
+SHIFT_ON_OCCUPIED = True
+PLAIN_LOC_RE = re.compile(r"^([A-Z가-힣]+)-(\d+)-(\d+)$")
+
 
 LEVEL_ALIASES = {"상": "상", "상단": "상", "위": "상", "top": "상", "하": "하", "하단": "하", "아래": "하", "bottom": "하"}
 
@@ -107,6 +113,13 @@ def next_editor(area):
     """처리 후 표를 새로 만들어 이전 체크 표시가 다른 줄에 남지 않게 함."""
     st.session_state.pop(editor_key(area), None)
     st.session_state[f"_editor_gen_{area}"] = st.session_state.get(f"_editor_gen_{area}", 0) + 1
+
+
+def shift_note(shifts):
+    """밀려난 품목 안내 문구."""
+    if not shifts:
+        return ""
+    return " / 뒤로 밀림: " + ", ".join(f"{p} {a}→{b}" for p, a, b in shifts)
 
 
 def show_flash(area):
@@ -261,6 +274,7 @@ def _cached_col_values(sheet_name, col, version):
 # ---------------------------------------------------------
 class SteelYardSheetDB:
     def __init__(self):
+        self.last_shifts = []  # 마지막 작업에서 밀려난 품목 [(품번, 이전위치, 새위치), ...]
         self.ws_items, self.ws_categories, self.ws_destinations, self.ws_log = get_worksheets()
 
     # ---------------- Master 정보 (짧게 캐싱해서 반복 조회 시 API 호출 절약) ----------------
@@ -328,6 +342,43 @@ class SteelYardSheetDB:
             return None
         return cell.row
 
+    # ---------------- 위치 밀어내기 ----------------
+    def _shift_occupants(self, loc_code, exclude_part=None):
+        """loc_code 자리에 다른 품목이 있으면 같은 구역·열의 품목들을 한 칸씩 뒤로 민다.
+        빈 번호가 나오는 곳에서 멈춤. 시트를 새로 읽어서(캐시 X) 행 번호를 정확히 잡는다."""
+        self.last_shifts = []
+        m = PLAIN_LOC_RE.match(loc_code or "")
+        if not SHIFT_ON_OCCUPIED or not m:
+            return []
+        zone, row_s, col_s = m.group(1), int(m.group(2)), int(m.group(3))
+
+        values = self.ws_items.get_all_values()
+        c_part, c_loc, c_status = ITEMS_COL["품번"] - 1, ITEMS_COL["위치"] - 1, ITEMS_COL["상태"] - 1
+        by_col = {}  # 행 번호(col) -> [(시트행, 품번)]
+        for sheet_row, vals in enumerate(values[1:], start=2):
+            vals = vals + [""] * (len(ITEMS_HEADERS) - len(vals))
+            if vals[c_status] not in ("IN_STOCK", "PENDING_DISPATCH"):
+                continue
+            if exclude_part and vals[c_part] == exclude_part:
+                continue
+            mm = PLAIN_LOC_RE.match(vals[c_loc].strip())
+            if mm and mm.group(1) == zone and int(mm.group(2)) == row_s:
+                by_col.setdefault(int(mm.group(3)), []).append((sheet_row, vals[c_part]))
+
+        updates, shifts = [], []
+        c = col_s
+        while c in by_col:  # 빈 번호를 만나면 멈춤
+            new_loc = format_location_code(zone, row_s, c + 1)
+            for sheet_row, part in by_col[c]:
+                updates.append({"range": f"D{sheet_row}", "values": [[new_loc]]})
+                shifts.append((part, format_location_code(zone, row_s, c), new_loc))
+            c += 1
+        if updates:
+            self.ws_items.batch_update(updates)
+            _bump_cache_version()
+        self.last_shifts = shifts
+        return shifts
+
     # ---------------- 1단계: 입고 -> 재고현황(IN_STOCK) ----------------
     def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks, level=""):
         clean_part_no = normalize_part_no(part_no)
@@ -349,6 +400,8 @@ class SteelYardSheetDB:
         active = df[df["상태"].isin(["IN_STOCK", "PENDING_DISPATCH"])] if not df.empty else df
         if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다. (2단 적재라면 상/하를 다르게 지정해주세요)")
+
+        self._shift_occupants(loc_code)
 
         clean_spec = strip_stray_quotes(spec).upper() if spec else ""
         clean_remarks = strip_stray_quotes(remarks) if remarks else ""
@@ -426,6 +479,11 @@ class SteelYardSheetDB:
         if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == new_loc_code).any():
             raise ValueError(f"[{new_loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
 
+        current_loc = self.ws_items.cell(row_idx, ITEMS_COL["위치"]).value or ""
+        if current_loc != new_loc_code:
+            self._shift_occupants(new_loc_code, exclude_part=clean_part_no)
+        else:
+            self.last_shifts = []
         self.ws_items.update_cell(row_idx, ITEMS_COL["위치"], new_loc_code)
         _bump_cache_version()
 
@@ -561,6 +619,12 @@ class SteelYardSheetDB:
         ]
         if not ALLOW_DUPLICATE_LOCATION and not active.empty and (active["위치"] == loc_code).any():
             raise ValueError(f"[{loc_code}] 위치에는 이미 다른 강판이 적재되어 있습니다.")
+
+        current_loc = self.ws_items.cell(row_idx, ITEMS_COL["위치"]).value or ""
+        if current_loc != loc_code:
+            self._shift_occupants(loc_code, exclude_part=original_part_no)
+        else:
+            self.last_shifts = []
 
         clean_spec = strip_stray_quotes(spec).upper() if spec else ""
         clean_remarks = strip_stray_quotes(remarks) if remarks else ""
@@ -973,7 +1037,9 @@ with tab_in:
                             db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks, level)
                             saved_loc = format_location_code(zone, row_n, col_n, level)
                             # rerun 후에도 결과가 보이도록 저장해 두었다가 아래에서 표시
-                            st.session_state["_inbound_msg"] = f"✅ [{full_part_no}] 입고 등록 완료! (위치: {saved_loc})"
+                            st.session_state["_inbound_msg"] = (
+                                f"✅ [{full_part_no}] 입고 등록 완료! (위치: {saved_loc})" + shift_note(db.last_shifts)
+                            )
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 등록 실패: {e}")
@@ -1136,7 +1202,7 @@ with tab_stock:
                         try:
                             db.update_location(u_part, u_zone, u_row, u_col, u_level)
                             new_loc = format_location_code(u_zone, u_row, u_col, u_level)
-                            st.success(f"✅ [{u_part}] 위치가 [{new_loc}](으)로 수정되었습니다!")
+                            add_flash("stock", "success", f"✅ [{u_part}] 위치가 [{new_loc}](으)로 수정되었습니다!" + shift_note(db.last_shifts))
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 위치 변경 실패: {e}")
@@ -1214,7 +1280,10 @@ with tab_stock:
                             remarks=changes.get("특기사항", orig["특기사항"]),
                         )
                         current_part[idx] = normalize_part_no(changes.get("품번", orig["품번"]))
-                        saved.append(f"{orig['품번']} → {saved_loc}" if "적재위치" in changes else orig["품번"])
+                        saved.append(
+                            (f"{orig['품번']} → {saved_loc}" + shift_note(db.last_shifts))
+                            if "적재위치" in changes else orig["품번"]
+                        )
                     except Exception as e:
                         errors.append(f"[{orig['품번']}] {e}")
                 if saved:
