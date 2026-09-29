@@ -1248,10 +1248,11 @@ with tab_stock:
                 "붙여서 `b0209`처럼 구역+열 2자리+행 2자리로 입력해도 B-02-09로 저장됩니다. "
                 "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
                 "보통은 비워두시면 됩니다. "
-                "출고 예정으로 보낼 품번은 **[출고]**(특기사항에 '삼성' 표시), 이관할 품번은 **[이관]**(특기사항에 '대주' 표시), "
-                "완전히 지울 품번은 **[삭제]** 체크박스를 여러 개 체크한 뒤 아래 버튼을 한 번 누르면 일괄 처리됩니다. "
+                "**[출고]**(특기사항에 '삼성')와 **[이관]**(특기사항에 '대주')을 체크한 뒤 **[✅ 확정]**을 한 번 누르면 "
+                "체크한 대로 [출고/이관예정내역]으로 일괄 이동합니다. "
+                "완전히 지울 품번은 **[삭제]** 체크 후 **[🗑️ 삭제]** 버튼을 누르세요. "
                 "칸(위치·특기사항 등)을 고친 뒤에는 **[💾 수정 저장]**을 눌러야 저장됩니다 "
-                "(출고/이관/삭제 버튼을 눌러도 고친 내용이 함께 저장됩니다)."
+                "(확정/삭제 버튼을 눌러도 고친 내용이 함께 저장됩니다)."
             )
 
             stock_df_display = stock_df.reset_index(drop=True).copy()
@@ -1286,13 +1287,12 @@ with tab_stock:
                     key=editor_key("stock"),
                 )
 
-                b_save, b_move, b_transfer, b_del = st.columns(4)
+                b_save, b_confirm, b_del = st.columns(3)
                 do_save = b_save.form_submit_button("💾 수정 저장", use_container_width=True)
-                do_move = b_move.form_submit_button("🚚 출고예정으로 이동", type="primary", use_container_width=True)
-                do_transfer = b_transfer.form_submit_button("🔁 이관", use_container_width=True)
+                do_confirm = b_confirm.form_submit_button("✅ 확정", type="primary", use_container_width=True)
                 do_delete = b_del.form_submit_button("🗑️ 삭제", use_container_width=True)
 
-            if do_save or do_move or do_transfer or do_delete:
+            if do_save or do_confirm or do_delete:
                 # 1) 칸 수정(종류/품번/규격/위치/특기사항)은 어느 버튼을 눌러도 먼저 저장
                 edited_rows = st.session_state.get(editor_key("stock"), {}).get("edited_rows", {})
                 field_cols = ["종류", "품번", "규격", "적재위치", "특기사항"]
@@ -1328,20 +1328,23 @@ with tab_stock:
                 def _checked(col):
                     return [current_part[i] for i in range(len(edited_df)) if bool(edited_df.loc[i, col])]
 
-                if do_move:
-                    parts = _checked("출고 선택")
-                    if parts:
-                        db.move_to_pending_dispatch(parts)
-                        add_flash("stock", "success", f"🚚 총 {len(parts)}건 → [출고/이관예정내역] 이동: {', '.join(parts)}")
-                    else:
-                        add_flash("stock", "warning", "출고 체크된 품번이 없습니다.")
-                if do_transfer:
-                    parts = _checked("이관 체크")
-                    if parts:
-                        db.transfer_to_pending(parts)
-                        add_flash("stock", "success", f"🔁 총 {len(parts)}건 이관 → [출고/이관예정내역] 이동: {', '.join(parts)}")
-                    else:
-                        add_flash("stock", "warning", "이관 체크된 품번이 없습니다.")
+                if do_confirm:
+                    # [확정] 하나로: 출고 체크 → 출고, 이관 체크 → 이관으로 [출고/이관예정내역]에 보냄
+                    out_parts = _checked("출고 선택")
+                    tr_parts = _checked("이관 체크")
+                    both = [p for p in out_parts if p in tr_parts]
+                    out_parts = [p for p in out_parts if p not in both]
+                    tr_parts = [p for p in tr_parts if p not in both]
+                    if both:
+                        add_flash("stock", "warning", f"출고와 이관이 둘 다 체크되어 처리하지 않았습니다: {', '.join(both)}")
+                    if out_parts:
+                        db.move_to_pending_dispatch(out_parts)
+                        add_flash("stock", "success", f"🚚 출고 {len(out_parts)}건 → [출고/이관예정내역] 이동: {', '.join(out_parts)}")
+                    if tr_parts:
+                        db.transfer_to_pending(tr_parts)
+                        add_flash("stock", "success", f"🔁 이관 {len(tr_parts)}건 → [출고/이관예정내역] 이동: {', '.join(tr_parts)}")
+                    if not (out_parts or tr_parts or both):
+                        add_flash("stock", "warning", "출고 또는 이관으로 체크된 품번이 없습니다.")
                 if do_delete:
                     parts = _checked("삭제 체크")
                     if parts:
