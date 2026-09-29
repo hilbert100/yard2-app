@@ -59,6 +59,36 @@ ALLOW_DUPLICATE_LOCATION = True
 # 같은 구역·열의 기존 품목들을 한 칸씩 뒤로 민다 (D-02-01→D-02-02, D-02-02→D-02-03 ...).
 # 중간에 빈 번호가 나오면 거기서 멈춤. 상/하가 붙은 2단 적재 위치는 대상 아님.
 SHIFT_ON_OCCUPIED = True
+
+# 특기사항 맨 앞 표시: [이관]으로 보낸 품목 → "대주", [출고]로 보낸 품목 → "삼성"
+MARK_TRANSFER = "대주"
+MARK_OUTBOUND = "삼성"
+_OLD_TRANSFER_MARKS = ("★이관", "●대주")  # 예전 이관 표시(정리용)
+_ALL_MARKS = _OLD_TRANSFER_MARKS + (MARK_TRANSFER, MARK_OUTBOUND)
+
+
+def strip_marks(remarks):
+    """특기사항 맨 앞에 붙은 대주/삼성(예전 ★이관·●대주 포함) 표시를 떼어냄 (맨 앞에 붙은 것만)."""
+    r = str(remarks or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for m in _ALL_MARKS:
+            # 표시만 있거나 "표시 / 메모" 형태일 때만 떼어냄 ('삼성전자 …' 같은 일반 메모는 그대로)
+            if r == m or r.startswith(m + " /") or r.startswith(m + "/"):
+                r = r[len(m):].lstrip(" /").strip()
+                changed = True
+    return r
+
+
+def add_mark(remarks, mark):
+    base = strip_marks(remarks)
+    return f"{mark} / {base}" if base else mark
+
+
+def is_transfer(remarks):
+    r = str(remarks or "").strip()
+    return any(r == m or r.startswith(m + " /") for m in (MARK_TRANSFER,) + _OLD_TRANSFER_MARKS) or "★이관" in r
 PLAIN_LOC_RE = re.compile(r"^([A-Z가-힣]+)-(\d+)-(\d+)$")
 
 
@@ -489,27 +519,27 @@ class SteelYardSheetDB:
 
     # ---------------- 2단계: 재고현황 체크 -> 출고예정(PENDING_DISPATCH) ----------------
     def move_to_pending_dispatch(self, part_numbers):
-        for p in part_numbers:
-            row_idx = self._find_item_row(p)
-            if row_idx:
-                self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "PENDING_DISPATCH")
-        _bump_cache_version()
-
-    def transfer_to_pending(self, part_numbers):
-        """이관 처리: 재고현황 -> 출고예정내역으로 이동하면서, 특기사항 맨 앞에
-        검은 별표시와 함께 '★이관'을 붙여 일반 출고예정과 구분되게 표시."""
+        """출고 처리: 특기사항 맨 앞에 '삼성' 표시를 붙이고 출고예정내역으로 이동."""
         for p in part_numbers:
             row_idx = self._find_item_row(p)
             if row_idx:
                 current_remarks = self.ws_items.cell(row_idx, ITEMS_COL["특기사항"]).value or ""
-                if "★이관" not in current_remarks:
-                    new_remarks = f"★이관 / {current_remarks}" if current_remarks else "★이관"
-                    self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], new_remarks)
+                self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], add_mark(current_remarks, MARK_OUTBOUND))
+                self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "PENDING_DISPATCH")
+        _bump_cache_version()
+
+    def transfer_to_pending(self, part_numbers):
+        """이관 처리: 특기사항 맨 앞에 '대주' 표시를 붙이고 출고예정내역으로 이동."""
+        for p in part_numbers:
+            row_idx = self._find_item_row(p)
+            if row_idx:
+                current_remarks = self.ws_items.cell(row_idx, ITEMS_COL["특기사항"]).value or ""
+                self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], add_mark(current_remarks, MARK_TRANSFER))
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "PENDING_DISPATCH")
         _bump_cache_version()
 
     # ---------------- 3단계: 출고확정 -> 출고내역(DISPATCHED) ----------------
-    def confirm_outbound(self, part_no, outbound_date, dest_name, remarks):
+    def confirm_outbound(self, part_no, outbound_date, dest_name, remarks, mark=None):
         clean_part_no = normalize_part_no(part_no)
         row_idx = self._find_item_row(clean_part_no)
         if not row_idx:
@@ -519,6 +549,9 @@ class SteelYardSheetDB:
         row_vals += [""] * (len(ITEMS_HEADERS) - len(row_vals))
 
         existing_remarks = row_vals[ITEMS_COL["특기사항"] - 1]
+        if mark is None:
+            mark = MARK_TRANSFER if is_transfer(existing_remarks) else MARK_OUTBOUND
+        existing_remarks = add_mark(existing_remarks, mark)
         final_remarks = existing_remarks
         if remarks:
             final_remarks = f"{existing_remarks} / [출고비고] {remarks}" if existing_remarks else remarks
@@ -552,10 +585,10 @@ class SteelYardSheetDB:
         for p in part_numbers:
             row_idx = self._find_item_row(p)
             if row_idx:
-                # 이관 예정이었다가 보류되는 경우, 특기사항에 붙었던 '★이관' 표시 제거
+                # 보류되면 특기사항에 붙었던 '대주'/'삼성' 표시 제거
                 current_remarks = self.ws_items.cell(row_idx, ITEMS_COL["특기사항"]).value or ""
-                if "★이관" in current_remarks:
-                    cleaned = current_remarks.replace("★이관 / ", "").replace("★이관", "").strip()
+                cleaned = strip_marks(current_remarks)
+                if cleaned != current_remarks:
                     self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], cleaned)
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "IN_STOCK")
         _bump_cache_version()
@@ -563,7 +596,7 @@ class SteelYardSheetDB:
     # ---------------- 출고/이관내역 보류 체크 -> 재고현황(IN_STOCK) 복원 ----------------
     def restore_dispatched_to_in_stock(self, part_no):
         """출고완료(DISPATCHED) 품목을 재고현황으로 되돌림.
-        출고일·배송지는 비우고, 특기사항에서 '★이관' 표시와 ' / [출고비고] ...' 부분을 제거.
+        출고일·배송지는 비우고, 특기사항에서 '대주'/'삼성' 표시와 ' / [출고비고] ...' 부분을 제거.
         적재위치와 입고일은 출고 전 값 그대로 유지. 출고 이력(DispatchLog)은 그대로 남김."""
         row_idx = self._find_item_row(part_no)
         if not row_idx:
@@ -575,7 +608,7 @@ class SteelYardSheetDB:
         remarks = row_vals[ITEMS_COL["특기사항"] - 1]
         if " / [출고비고]" in remarks:
             remarks = remarks.split(" / [출고비고]")[0]
-        remarks = remarks.replace("★이관 / ", "").replace("★이관", "").strip()
+        remarks = strip_marks(remarks)
 
         inbound_date_val = row_vals[ITEMS_COL["입고일"] - 1]
 
@@ -1215,7 +1248,7 @@ with tab_stock:
                 "붙여서 `b0209`처럼 구역+열 2자리+행 2자리로 입력해도 B-02-09로 저장됩니다. "
                 "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
                 "보통은 비워두시면 됩니다. "
-                "출고 예정으로 보낼 품번은 **[출고]**, 특기사항에 ★이관 표시와 함께 출고예정으로 보낼 품번은 **[이관]**, "
+                "출고 예정으로 보낼 품번은 **[출고]**(특기사항에 '삼성' 표시), 이관할 품번은 **[이관]**(특기사항에 '대주' 표시), "
                 "완전히 지울 품번은 **[삭제]** 체크박스를 여러 개 체크한 뒤 아래 버튼을 한 번 누르면 일괄 처리됩니다. "
                 "칸(위치·특기사항 등)을 고친 뒤에는 **[💾 수정 저장]**을 눌러야 저장됩니다 "
                 "(출고/이관/삭제 버튼을 눌러도 고친 내용이 함께 저장됩니다)."
@@ -1306,7 +1339,7 @@ with tab_stock:
                     parts = _checked("이관 체크")
                     if parts:
                         db.transfer_to_pending(parts)
-                        add_flash("stock", "success", f"🔁 총 {len(parts)}건 ★이관 표시와 함께 [출고/이관예정내역] 이동: {', '.join(parts)}")
+                        add_flash("stock", "success", f"🔁 총 {len(parts)}건 이관 → [출고/이관예정내역] 이동: {', '.join(parts)}")
                     else:
                         add_flash("stock", "warning", "이관 체크된 품번이 없습니다.")
                 if do_delete:
@@ -1343,23 +1376,25 @@ with tab_pending:
 
     if not pending_df.empty:
         if not is_admin:
-            render_html_table(pending_df)
-            st.info("💡 보류·확정 처리는 관리자 권한이 필요합니다.")
+            _view = pending_df.copy()
+            _view["구분"] = _view["특기사항"].map(lambda r: "●이관" if is_transfer(r) else "출고")
+            render_html_table(_view[["종류", "품번", "구분", "특기사항"]])
+            st.info("💡 확정·보류 처리는 관리자 권한이 필요합니다.")
         else:
-            destinations = db.get_destinations()
-            if not destinations:
-                st.error("등록된 배송지가 없습니다. Master 관리 탭에서 추가해 주세요.")
-            else:
+            if True:
                 st.info(
                     "💡 **보류**를 체크하면 [실시간 재고현황]으로 복원되고, **확정**을 체크하면 "
-                    "옆의 배송지로 [출고/이관내역]으로 이동합니다 (출고일자는 오늘 날짜로 자동 입력). "
+                    "[출고/이관내역]으로 이동합니다 (출고일자는 오늘 날짜, 배송지는 출고→삼성 / 이관→대주로 자동 입력). "
                     "체크 후 아래 [적용] 버튼을 눌러주세요."
                 )
 
                 pending_df_display = pending_df.reset_index(drop=True).copy()
-                pending_df_display["보류 체크"] = False
+                # 재고현황에서 [출고]로 보낸 건 '출고', [이관]으로 보낸 건 '●이관'
+                pending_df_display["구분"] = pending_df_display["특기사항"].map(
+                    lambda r: "●이관" if is_transfer(r) else "출고"
+                )
                 pending_df_display["확정 체크"] = False
-                pending_df_display["배송지"] = destinations[0]
+                pending_df_display["보류 체크"] = False
 
 
                 with st.form("pending_action_form", clear_on_submit=False):
@@ -1367,7 +1402,7 @@ with tab_pending:
                         pending_df_display,
                         use_container_width=True,
                         hide_index=True,
-                        disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항"],
+                        disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "구분"],
                         column_config={
                             "종류": st.column_config.TextColumn("종류", width="small"),
                             "품번": st.column_config.TextColumn("품번", width="medium"),
@@ -1376,21 +1411,21 @@ with tab_pending:
                             "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
                             "특기사항": st.column_config.TextColumn("특기사항", width="small"),
                             "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
+                            "구분": st.column_config.TextColumn("구분", width="small"),
                             "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
-                            "배송지": st.column_config.SelectboxColumn("배송지", width="small", options=destinations),
                         },
+                        column_order=["종류", "품번", "구분", "특기사항", "보류 체크", "확정 체크"],
                         key=editor_key("pending"),
                     )
                     do_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
 
                 if do_apply:
-                    hold_rows = edited_pending_df[edited_pending_df["보류 체크"] == True]
-                    confirm_rows = edited_pending_df[
-                        (edited_pending_df["확정 체크"] == True) & (edited_pending_df["보류 체크"] == False)
-                    ]
+                    epd = edited_pending_df
+                    hold_rows = epd[epd["보류 체크"] == True]
+                    confirm_rows = epd[(epd["확정 체크"] == True) & (epd["보류 체크"] == False)]
 
                     if hold_rows.empty and confirm_rows.empty:
-                        add_flash("pending", "warning", "보류 또는 확정으로 체크된 품번이 없습니다.")
+                        add_flash("pending", "warning", "확정 또는 보류로 체크된 품번이 없습니다.")
                     else:
                         today = datetime.now().date()
 
@@ -1402,12 +1437,13 @@ with tab_pending:
                         confirm_success = []
                         for _, row in confirm_rows.iterrows():
                             try:
-                                db.confirm_outbound(row["품번"], today, row["배송지"], "")
+                                mark = MARK_TRANSFER if row["구분"] == "●이관" else MARK_OUTBOUND
+                                db.confirm_outbound(row["품번"], today, mark, "", mark=mark)
                                 confirm_success.append(row["품번"])
                             except Exception as e:
                                 add_flash("pending", "error", f"❌ [{row['품번']}] {e}")
                         if confirm_success:
-                            add_flash("pending", "success", f"🎉 총 {len(confirm_success)}건 확정 → [출고/이관내역]으로 이동: {', '.join(confirm_success)}")
+                            add_flash("pending", "success", f"🎉 총 {len(confirm_success)}건 → [출고/이관내역]으로 이동: {', '.join(confirm_success)}")
 
                     next_editor("pending")
                     st.rerun()
