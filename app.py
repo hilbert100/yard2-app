@@ -670,7 +670,11 @@ class SteelYardSheetDB:
 
         if df.empty:
             return pd.DataFrame(columns=cols)
-        return df[cols].sort_values(["출고일", "품번"], ascending=[False, True]).reset_index(drop=True)
+        # 출고일 최신순 → 같은 날짜 안에서는 종류를 가나다·알파벳순 → 품번순
+        out = df[cols].copy()
+        out["_cat_key"] = out["종류"].map(category_sort_key)
+        out = out.sort_values(["출고일", "_cat_key", "품번"], ascending=[False, True, True])
+        return out.drop(columns="_cat_key").reset_index(drop=True)
 
 
 # ---------------------------------------------------------
