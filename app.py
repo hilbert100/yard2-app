@@ -271,15 +271,23 @@ def _get_or_create_ws(ss, name, headers):
         ws = ss.add_worksheet(title=name, rows=1000, cols=len(headers) + 2)
         ws.append_row(headers)
         return ws
+    # 새 열(예: 배차정보)이 추가된 경우 시트 칸 수가 모자라면 늘리고, 머리글 줄을 맞춤
+    if ws.col_count < len(headers):
+        ws.add_cols(len(headers) - ws.col_count)
     if ws.row_values(1) != headers:
         ws.update("A1", [headers])
     return ws
 
 
+# 머리글(열 구성)이 바뀌면 이 값도 바뀌어서, 아래 get_worksheets가 캐시를 무시하고 다시 실행됨
+# (안 그러면 새 코드를 올려도 예전 캐시 때문에 시트 머리글에 새 열 이름이 안 들어감)
+SCHEMA_KEY = (tuple(ITEMS_HEADERS), tuple(LOG_HEADERS))
+
+
 @st.cache_resource
-def get_worksheets():
-    """탭(Items/Categories/Destinations/DispatchLog) 확보 + 기본값 시딩.
-    이 배포본에서 딱 한 번만 실행되어(모든 사용자/재실행이 공유) API 호출을 크게 아낍니다."""
+def get_worksheets(schema_key=SCHEMA_KEY):
+    """탭(Items/Categories/Destinations/DispatchLog) 확보 + 기본값 시딩 + 머리글 맞춤.
+    열 구성이 같으면 한 번만 실행되어(모든 사용자/재실행이 공유) API 호출을 아낍니다."""
     ss = get_spreadsheet()
     ws_items = _get_or_create_ws(ss, "Items", ITEMS_HEADERS)
     ws_categories = _get_or_create_ws(ss, "Categories", CATEGORIES_HEADERS)
@@ -324,7 +332,7 @@ def _cached_col_values(sheet_name, col, version):
 class SteelYardSheetDB:
     def __init__(self):
         self.last_shifts = []  # 마지막 작업에서 밀려난 품목 [(품번, 이전위치, 새위치), ...]
-        self.ws_items, self.ws_categories, self.ws_destinations, self.ws_log = get_worksheets()
+        self.ws_items, self.ws_categories, self.ws_destinations, self.ws_log = get_worksheets(SCHEMA_KEY)
 
     # ---------------- Master 정보 (짧게 캐싱해서 반복 조회 시 API 호출 절약) ----------------
     def get_categories(self):
