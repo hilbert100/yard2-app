@@ -176,13 +176,28 @@ def show_flash(area):
         getattr(st, kind)(msg)
 
 
-def normalize_part_no(raw):
+# 품번 앞에 F를 자동으로 붙이지 않는 종류 (이 종류는 품번 끝에 상/하를 붙일 수 있음)
+NO_F_CATEGORIES = ["R칼럼"]
+
+
+def is_no_f_category(category_name):
+    key = str(category_name or "").replace(" ", "").upper()
+    return any(key == c.replace(" ", "").upper() for c in NO_F_CATEGORIES)
+
+
+def clean_part_text(raw):
+    """F를 붙이지 않고 대문자·따옴표 정리만 (이미 저장된 품번을 다룰 때 사용)."""
+    return strip_stray_quotes((raw or "").strip().upper())
+
+
+def normalize_part_no(raw, category_name=None):
     """품번 맨 앞의 고정 접두사 'F'를 자동으로 붙여준다.
-    이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')"""
-    s = (raw or "").strip().upper()
-    # 엑셀 텍스트 서식용 작은따옴표(' / ')가 값에 섞여 들어온 경우 제거
-    s = strip_stray_quotes(s)
+    이미 F로 시작하면 그대로 두고, 없으면 앞에 붙인다. (예: 'B2-2B-004-3' -> 'FB2-2B-004-3')
+    단, R칼럼 등 NO_F_CATEGORIES 종류는 F를 붙이지 않는다."""
+    s = clean_part_text(raw)
     if not s:
+        return s
+    if is_no_f_category(category_name):
         return s
     if not s.startswith("F"):
         s = "F" + s
@@ -226,13 +241,19 @@ def parse_location_parts(raw):
     return zone.strip().upper(), int(row), int(col), (level or "")
 
 
-def parse_part_no_input(raw):
+def parse_part_no_input(raw, category_name=None):
     """띄어쓰기(또는 하이픈·쉼표)로 구분한 품번을 하이픈으로 연결.
-    'b2 2b 004 3' -> 'FB2-2B-004-3' (4단은 없어도 됨). 형식이 맞지 않으면 None."""
+    'b2 2b 004 3' -> 'FB2-2B-004-3' (4단은 없어도 됨). 형식이 맞지 않으면 None.
+    R칼럼은 F를 붙이지 않고, 맨 끝에 상/하를 붙일 수 있음 ('r1 2a 003 상' -> 'R1-2A-003-상')."""
     tokens = [t for t in re.split(r"[\s,\-/]+", strip_stray_quotes(raw or "").strip()) if t]
+    if is_no_f_category(category_name) and tokens and tokens[-1] in ("상", "하"):
+        body = tokens[:-1]
+        if not 3 <= len(body) <= 4:
+            return None
+        return normalize_part_no("-".join(body + [tokens[-1]]).upper(), category_name)
     if not 3 <= len(tokens) <= 4:
         return None
-    return normalize_part_no("-".join(tokens).upper())
+    return normalize_part_no("-".join(tokens).upper(), category_name)
 
 
 def normalize_location_input(raw):
@@ -440,7 +461,7 @@ class SteelYardSheetDB:
 
     # ---------------- 1단계: 입고 -> 재고현황(IN_STOCK) ----------------
     def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks, level=""):
-        clean_part_no = normalize_part_no(part_no)
+        clean_part_no = normalize_part_no(part_no, category_name)
         loc_code = format_location_code(zone, row, col, level)
 
         if category_name not in self.get_categories():
@@ -492,7 +513,7 @@ class SteelYardSheetDB:
 
         for r in rows:
             try:
-                clean_part_no = normalize_part_no(r.get("part_no", ""))
+                clean_part_no = normalize_part_no(r.get("part_no", ""), r.get("category_name", ""))
                 if not clean_part_no:
                     raise ValueError("품번이 비어있습니다.")
                 if clean_part_no in existing_parts or clean_part_no in seen_parts:
@@ -526,7 +547,7 @@ class SteelYardSheetDB:
 
     # ---------------- 적재위치 변경 ----------------
     def update_location(self, part_no, new_zone, new_row, new_col, level=""):
-        clean_part_no = normalize_part_no(part_no)
+        clean_part_no = clean_part_text(part_no)
         new_loc_code = format_location_code(new_zone, new_row, new_col, level)
 
         row_idx = self._find_item_row(clean_part_no)
@@ -569,7 +590,7 @@ class SteelYardSheetDB:
 
     # ---------------- 3단계: 출고확정 -> 출고내역(DISPATCHED) ----------------
     def confirm_outbound(self, part_no, outbound_date, dest_name, remarks, mark=None):
-        clean_part_no = normalize_part_no(part_no)
+        clean_part_no = clean_part_text(part_no)
         row_idx = self._find_item_row(clean_part_no)
         if not row_idx:
             raise ValueError("존재하지 않는 품번입니다.")
@@ -615,6 +636,14 @@ class SteelYardSheetDB:
             raise ValueError("존재하지 않는 품번입니다.")
         self.ws_items.update_cell(row_idx, ITEMS_COL["배차정보"], code)
         self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "DISPATCH_ASSIGNED")
+        _bump_cache_version()
+
+    def set_dispatch_code(self, part_no, code):
+        """배차확정 화면에서 배차정보(차량번호 4자리)만 수정."""
+        row_idx = self._find_item_row(part_no)
+        if not row_idx:
+            raise ValueError("존재하지 않는 품번입니다.")
+        self.ws_items.update_cell(row_idx, ITEMS_COL["배차정보"], code)
         _bump_cache_version()
 
     # ---------------- 4단계: 보류 체크 -> 재고현황(IN_STOCK) 복원 ----------------
@@ -666,7 +695,7 @@ class SteelYardSheetDB:
         if not row_idx:
             raise ValueError(f"[{original_part_no}] 품번을 찾을 수 없습니다.")
 
-        new_part_no_clean = normalize_part_no(new_part_no)
+        new_part_no_clean = normalize_part_no(new_part_no, category_name)
         if not new_part_no_clean:
             raise ValueError("품번은 비워둘 수 없습니다.")
 
@@ -720,7 +749,7 @@ class SteelYardSheetDB:
         quote_chars = STRAY_QUOTE_CHARS
         for i, row in df.iterrows():
             old_part = row["품번"]
-            new_part = normalize_part_no(old_part)
+            new_part = normalize_part_no(old_part, row["종류"])
             old_remarks = row["특기사항"]
             new_remarks = old_remarks
             if any(q in old_remarks for q in quote_chars):
@@ -1089,7 +1118,8 @@ with tab_in:
                         "품번 (띄어쓰기로 구분, F 자동)",
                         placeholder="예: b2 2b 004 3",
                         help="단 사이를 띄어 쓰면 하이픈으로 연결되고 맨 앞에 F가 붙습니다. "
-                             "b2 2b 004 3 → FB2-2B-004-3 (4단은 없으면 생략)",
+                             "b2 2b 004 3 → FB2-2B-004-3 (4단은 없으면 생략). "
+                             "단, R칼럼은 F가 붙지 않고 끝에 상/하를 붙일 수 있습니다: r1 2a 003 상 → R1-2A-003-상",
                     )
 
                 with col_spec:
@@ -1112,7 +1142,7 @@ with tab_in:
                 st.divider()
 
                 if st.form_submit_button("⚡ 실시간 입고 등록", use_container_width=True):
-                    full_part_no = parse_part_no_input(part_raw)
+                    full_part_no = parse_part_no_input(part_raw, cat_name)
                     loc_parts = parse_location_parts(loc_raw)
                     if not full_part_no:
                         st.error("품번을 확인해주세요. 단 사이를 띄어서 3~4단으로 입력합니다 (예: b2 2b 004 3).")
@@ -1216,15 +1246,16 @@ with tab_in:
                             "zone": zone, "row": row_n, "col": col_n,
                             "inbound_date": in_date, "remarks": remarks, "level": level,
                         })
-                        row_no_by_part[normalize_part_no(full_part_no)] = excel_row_no
+                        row_no_by_part[normalize_part_no(full_part_no, cat)] = excel_row_no
+                        row_no_by_part[full_part_no] = excel_row_no
 
                     # 2단계: 구글 시트는 딱 두 번만 호출 (읽기 1회 + 쓰기 1회)해서 후보들을 실제로 등록
                     bulk_results = db.bulk_register_inbound(candidate_rows) if candidate_rows else []
 
                     final_results = list(skip_results) + list(shape_error_results)
                     for part_no, ok, msg in bulk_results:
-                        normalized = normalize_part_no(part_no)
-                        excel_row_no = row_no_by_part.get(normalized, "-")
+                        normalized = part_no if ok else clean_part_text(part_no)
+                        excel_row_no = row_no_by_part.get(part_no, row_no_by_part.get(normalized, "-"))
                         final_results.append((excel_row_no, normalized, "✅ 성공" if ok else "❌ 실패", "" if ok else msg))
 
                     final_results.sort(key=lambda r: (r[0] if isinstance(r[0], int) else 9999))
@@ -1366,7 +1397,9 @@ with tab_stock:
                             location_code=changes.get("적재위치", orig["적재위치"]),
                             remarks=changes.get("특기사항", orig["특기사항"]),
                         )
-                        current_part[idx] = normalize_part_no(changes.get("품번", orig["품번"]))
+                        current_part[idx] = normalize_part_no(
+                            changes.get("품번", orig["품번"]), changes.get("종류", orig["종류"])
+                        )
                         saved.append(
                             (f"{orig['품번']} → {saved_loc}" + shift_note(db.last_shifts))
                             if "적재위치" in changes else orig["품번"]
@@ -1435,7 +1468,9 @@ with tab_pending:
         pending_df = pending_df.copy()
         pending_df["구분"] = pending_df["특기사항"].map(gubun_of)
         if not is_admin:
-            render_html_table(pending_df[["종류", "품번", "구분", "특기사항", "배차정보"]])
+            render_html_table(
+                pending_df[["종류", "품번", "적재위치", "구분", "특기사항", "배차정보"]].rename(columns={"적재위치": "위치"})
+            )
             st.info("💡 배차정보 입력·확정·보류 처리는 관리자 권한이 필요합니다.")
         else:
             st.info(
@@ -1457,13 +1492,14 @@ with tab_pending:
                     column_config={
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
+                        "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
                         "특기사항": st.column_config.TextColumn("특기사항", width="small"),
                         "배차정보": st.column_config.TextColumn("배차정보", width="small", max_chars=4),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
-                    column_order=["종류", "품번", "구분", "특기사항", "배차정보", "보류 체크", "확정 체크"],
+                    column_order=["종류", "품번", "적재위치", "구분", "특기사항", "배차정보", "보류 체크", "확정 체크"],
                     key=editor_key("pending"),
                 )
                 do_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
@@ -1520,7 +1556,8 @@ with tab_assign:
             st.info("💡 확정·보류 처리는 관리자 권한이 필요합니다.")
         else:
             st.info(
-                "💡 같은 차량(배차정보)끼리 모아서 보여줍니다. **확정**을 체크하면 [출고/이관내역]으로 이동하고 "
+                "💡 같은 차량(배차정보)끼리 모아서 보여줍니다. 배차정보 칸을 눌러 번호를 고칠 수 있습니다(숫자 4자리). "
+                "**확정**을 체크하면 [출고/이관내역]으로 이동하고 "
                 "(출고일자는 오늘 날짜, 배송지는 출고→삼성 / 이관→대주로 자동 입력), "
                 "**보류**를 체크하면 [실시간 재고현황]으로 복원됩니다. 체크 후 아래 [적용] 버튼을 눌러주세요."
             )
@@ -1534,9 +1571,9 @@ with tab_assign:
                     assign_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "구분", "배차정보"],
+                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "구분"],
                     column_config={
-                        "배차정보": st.column_config.TextColumn("배차정보", width="small"),
+                        "배차정보": st.column_config.TextColumn("배차정보", width="small", max_chars=4),
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
@@ -1552,10 +1589,40 @@ with tab_assign:
             if do_assign_apply:
                 ead = edited_assign_df
                 hold_rows = ead[ead["보류 체크"] == True]
-                confirm_rows = ead[(ead["확정 체크"] == True) & (ead["보류 체크"] == False)]
+
+                # 배차정보 수정분 먼저 저장 (보류할 줄은 어차피 지워지므로 제외)
+                code_changed, bad_codes, blocked = [], [], set()
+                for i in range(len(ead)):
+                    part = ead.loc[i, "품번"]
+                    if bool(ead.loc[i, "보류 체크"]):
+                        continue
+                    new_raw = str(ead.loc[i, "배차정보"] if ead.loc[i, "배차정보"] is not None else "").strip()
+                    old = str(assign_display.loc[i, "배차정보"]).strip()
+                    if new_raw == old:
+                        continue
+                    code = clean_dispatch_code(new_raw)
+                    if not code:
+                        bad_codes.append(part)
+                        blocked.add(part)  # 잘못된 번호면 이 줄은 확정도 하지 않음
+                        continue
+                    try:
+                        db.set_dispatch_code(part, code)
+                        code_changed.append(f"{part} {old}→{code}")
+                    except Exception as e:
+                        add_flash("assign", "error", f"❌ [{part}] {e}")
+                        blocked.add(part)
+                if code_changed:
+                    add_flash("assign", "success", f"🔢 배차정보 수정: {', '.join(code_changed)}")
+                if bad_codes:
+                    add_flash("assign", "error",
+                              "배차정보가 비어 있거나 숫자 4자리가 아니어서 수정·확정하지 않았습니다: "
+                              f"{', '.join(bad_codes)} (예: 1234)")
+
+                confirm_rows = ead[(ead["확정 체크"] == True) & (ead["보류 체크"] == False) & (~ead["품번"].isin(blocked))]
 
                 if hold_rows.empty and confirm_rows.empty:
-                    add_flash("assign", "warning", "확정 또는 보류로 체크된 품번이 없습니다.")
+                    if not code_changed and not bad_codes:
+                        add_flash("assign", "warning", "확정·보류 체크나 배차정보 수정이 없습니다.")
                 else:
                     if not hold_rows.empty:
                         hold_parts = hold_rows["품번"].tolist()
