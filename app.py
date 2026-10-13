@@ -1,5 +1,8 @@
+import hashlib
+import hmac
 import io
 import re
+import time
 from datetime import datetime
 
 import gspread
@@ -1065,12 +1068,69 @@ try:
 except Exception:
     ADMIN_PIN = "1234"  # secrets.toml 미설정 시 임시값 — 운영 전 반드시 교체
 
+# ---------------------------------------------------------
+# 관리자 로그인 유지 (쿠키, 30일)
+#   로그인하면 이 폰(브라우저)에 서명된 출입증 쿠키를 저장 → 다른 앱 쓰다 돌아오거나
+#   홈 화면 아이콘으로 새로 열어도 30일 동안 관리자 모드 유지. [관리자 로그아웃]을 누르면 삭제.
+#   비밀번호(admin_pin)를 바꾸면 기존 출입증은 모두 무효가 됨.
+# ---------------------------------------------------------
+ADMIN_COOKIE_NAME = "yard2_admin"
+ADMIN_COOKIE_DAYS = 30
+
+
+def _admin_cookie_key():
+    return hashlib.sha256(("yard2-admin|" + str(ADMIN_PIN)).encode("utf-8")).digest()
+
+
+def make_admin_token():
+    exp = str(int(time.time()) + ADMIN_COOKIE_DAYS * 86400)
+    sig = hmac.new(_admin_cookie_key(), exp.encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}"
+
+
+def is_valid_admin_token(token):
+    try:
+        exp, sig = str(token or "").split(".", 1)
+        if int(exp) < time.time():
+            return False
+    except Exception:
+        return False
+    good = hmac.new(_admin_cookie_key(), exp.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, good)
+
+
+def read_admin_cookie():
+    try:
+        return st.context.cookies.get(ADMIN_COOKIE_NAME)
+    except Exception:
+        return None
+
+
+def write_admin_cookie(value, max_age):
+    components.html(
+        "<script>window.parent.document.cookie = "
+        f"'{ADMIN_COOKIE_NAME}={value}; path=/; max-age={max_age}; SameSite=Lax; Secure';</script>",
+        height=0,
+    )
+
+
 if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
+    # 새로 열릴 때만 쿠키 확인 (같은 화면 안에서 로그아웃한 뒤엔 다시 자동 로그인 안 함)
+    st.session_state.is_admin = is_valid_admin_token(read_admin_cookie())
+
+# 로그인/로그아웃 직후 쿠키 저장·삭제
+_cookie_action = st.session_state.pop("_admin_cookie_action", None)
+if _cookie_action == "set":
+    write_admin_cookie(make_admin_token(), ADMIN_COOKIE_DAYS * 86400)
+elif _cookie_action == "clear":
+    write_admin_cookie("", 0)
 
 with st.container(border=True):
     c_role, c_pin = st.columns([2, 3])
-    role_selection = c_role.radio("사용자 권한", ["이용자 (조회만)", "관리자"], horizontal=True)
+    role_selection = c_role.radio(
+        "사용자 권한", ["이용자 (조회만)", "관리자"], horizontal=True,
+        index=1 if st.session_state.is_admin else 0,
+    )
 
     if role_selection == "관리자":
         if not st.session_state.is_admin:
@@ -1080,13 +1140,14 @@ with st.container(border=True):
             if submitted:
                 if input_pin == ADMIN_PIN:
                     st.session_state.is_admin = True
-                    st.success("🔓 관리자 인증 성공!")
+                    st.session_state["_admin_cookie_action"] = "set"
                     st.rerun()
                 else:
                     st.error("❌ 비밀번호가 올바르지 않습니다.")
         else:
             if c_pin.button("🔒 관리자 로그아웃"):
                 st.session_state.is_admin = False
+                st.session_state["_admin_cookie_action"] = "clear"
                 st.rerun()
     else:
         st.session_state.is_admin = False
