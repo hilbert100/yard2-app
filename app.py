@@ -1114,9 +1114,58 @@ def write_admin_cookie(value, max_age):
     )
 
 
+def probe_admin_cookie():
+    """서버가 쿠키를 직접 못 받는 환경(Streamlit Cloud 등) 대비:
+    브라우저에서 쿠키를 읽어, 있으면 주소에 ?a=출입증 을 붙여 한 번 다시 연다.
+    (서버는 그 값을 확인한 뒤 주소에서 바로 지움)"""
+    components.html(
+        """
+        <script>
+        (function () {
+          var NAME = "%s";
+          var d = window.parent.document;
+          var m = d.cookie.match(new RegExp("(?:^|; )" + NAME + "=([^;]+)"));
+          if (!m || !m[1]) return;
+          var code = "(function(){var u=new URL(window.location.href);"
+                   + "if(u.searchParams.get('a'))return;"
+                   + "u.searchParams.set('a','" + m[1] + "');window.location.replace(u.toString());})();";
+          try {
+            var s = d.createElement("script");   // 부모 창 안에서 실행 (iframe 제약 회피)
+            s.textContent = code;
+            d.head.appendChild(s);
+          } catch (e) {
+            try { var u = new URL(window.parent.location.href);
+                  if (!u.searchParams.get("a")) { u.searchParams.set("a", m[1]);
+                    window.parent.location.replace(u.toString()); } } catch (e2) {}
+          }
+        })();
+        </script>
+        """ % ADMIN_COOKIE_NAME,
+        height=0,
+    )
+
+
+def _pop_query_token():
+    try:
+        tok = st.query_params.get("a")
+        if tok:
+            del st.query_params["a"]  # 주소창에 출입증이 남지 않도록 바로 지움
+        return tok
+    except Exception:
+        return None
+
+
+_qp_token = _pop_query_token()
 if "is_admin" not in st.session_state:
-    # 새로 열릴 때만 쿠키 확인 (같은 화면 안에서 로그아웃한 뒤엔 다시 자동 로그인 안 함)
-    st.session_state.is_admin = is_valid_admin_token(read_admin_cookie())
+    # 새로 열릴 때만 확인 (같은 화면 안에서 로그아웃한 뒤엔 다시 자동 로그인 안 함)
+    _ok = is_valid_admin_token(read_admin_cookie())
+    if not _ok and _qp_token:
+        _ok = is_valid_admin_token(_qp_token)
+        if not _ok:
+            st.session_state["_admin_cookie_action"] = "clear"  # 만료·무효 출입증은 삭제 (무한 반복 방지)
+    st.session_state.is_admin = _ok
+    if not _ok and not _qp_token:
+        st.session_state["_admin_cookie_probe"] = True
 
 # 로그인/로그아웃 직후 쿠키 저장·삭제
 _cookie_action = st.session_state.pop("_admin_cookie_action", None)
@@ -1124,6 +1173,8 @@ if _cookie_action == "set":
     write_admin_cookie(make_admin_token(), ADMIN_COOKIE_DAYS * 86400)
 elif _cookie_action == "clear":
     write_admin_cookie("", 0)
+if st.session_state.pop("_admin_cookie_probe", False):
+    probe_admin_cookie()
 
 with st.container(border=True):
     c_role, c_pin = st.columns([2, 3])
