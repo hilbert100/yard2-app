@@ -1437,20 +1437,6 @@ with tab_stock:
                         except Exception as e:
                             st.error(f"❌ 위치 변경 실패: {e}")
 
-            st.info(
-                "💡 "
-                "품번 맨 앞의 F는 안 쓰셔도 저장할 때 자동으로 붙습니다. "
-                "위치는 정확한 형식(A-01-01) 없이 구역·열·행을 순서대로 입력하시면 "
-                "자동으로 하이픈이 붙습니다 (예: `A 1 1`, `A,1,1`, `A-1-1` 모두 A-01-01로 저장됨). "
-                "붙여서 `b0209`처럼 구역+열 2자리+행 2자리로 입력해도 B-02-09로 저장됩니다. "
-                "2단 적재라면 맨 뒤에 상 또는 하를 추가로 입력하세요 (예: `A 1 1 상` → A-01-01-상). "
-                "보통은 비워두시면 됩니다. "
-                "**[출고]**(특기사항에 '삼성')와 **[이관]**(특기사항에 '대주')을 체크한 뒤 **[✅ 확정]**을 한 번 누르면 "
-                "체크한 대로 [출고/이관예정내역]으로 일괄 이동합니다. "
-                "완전히 지울 품번은 **[삭제]** 체크 후 **[🗑️ 삭제]** 버튼을 누르세요. "
-                "칸(위치·특기사항 등)을 고친 뒤에는 **[💾 수정 저장]**을 눌러야 저장됩니다 "
-                "(확정/삭제 버튼을 눌러도 고친 내용이 함께 저장됩니다)."
-            )
 
             stock_df_display = stock_df.reset_index(drop=True).copy()
             stock_df_display["출고 선택"] = False
@@ -1583,13 +1569,7 @@ with tab_pending:
             render_html_table(
                 pending_df[["종류", "품번", "적재위치", "구분", "특기사항", "배차정보"]].rename(columns={"적재위치": "위치"})
             )
-            st.info("💡 배차정보 입력·확정·보류 처리는 관리자 권한이 필요합니다.")
         else:
-            st.info(
-                "💡 **배차정보**(차량번호 숫자 4자리)를 입력하고 **확정**을 체크하면 [배차확정]으로 넘어갑니다. "
-                "**보류**를 체크하면 [실시간 재고현황]으로 복원됩니다. "
-                "체크 후 아래 [적용] 버튼을 눌러주세요."
-            )
 
             pending_df_display = pending_df.reset_index(drop=True).copy()
             pending_df_display["보류 체크"] = False
@@ -1665,14 +1645,7 @@ with tab_assign:
         assign_df["구분"] = assign_df["특기사항"].map(gubun_of)
         if not is_admin:
             render_html_table(assign_df[["배차정보", "종류", "품번", "구분", "특기사항"]])
-            st.info("💡 확정·보류 처리는 관리자 권한이 필요합니다.")
         else:
-            st.info(
-                "💡 같은 차량(배차정보)끼리 모아서 보여줍니다. 배차정보 칸을 눌러 번호를 고칠 수 있습니다(숫자 4자리). "
-                "**확정**을 체크하면 [출고/이관내역]으로 이동하고 "
-                "(출고일자는 오늘 날짜, 배송지는 출고→삼성 / 이관→대주로 자동 입력), "
-                "**보류**를 체크하면 [실시간 재고현황]으로 복원됩니다. 체크 후 아래 [적용] 버튼을 눌러주세요."
-            )
 
             assign_display = assign_df.reset_index(drop=True).copy()
             assign_display["보류 체크"] = False
@@ -1795,10 +1768,6 @@ with tab_history:
         if not is_admin:
             render_html_table(dispatched_df)
         else:
-            st.info(
-                "💡 출고를 취소하고 재고로 되돌릴 건은 **[보류]**, "
-                "잘못 등록된 출고 건은 **[삭제]** 체크박스를 체크한 뒤 아래 버튼을 눌러주세요."
-            )
 
             dispatched_df_display = dispatched_df.reset_index(drop=True).copy()
             dispatched_df_display["보류 체크"] = False
