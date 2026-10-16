@@ -119,6 +119,14 @@ def add_mark(remarks, mark):
     return f"{mark} / {base}" if base else mark
 
 
+def pending_dest_order(remarks):
+    """출고/이관예정내역 정렬용: 북침 0, 북야 1, 남침 2, 남야 3, (구분 없는 삼성 4), 대주(이관) 5."""
+    if is_transfer(remarks):
+        return len(OUTBOUND_ZONES) + 1
+    m = outbound_mark_of(remarks)
+    return OUTBOUND_ZONE_MARKS.index(m) if m in OUTBOUND_ZONE_MARKS else len(OUTBOUND_ZONES)
+
+
 def gubun_of(remarks):
     """재고현황에서 [출고]로 보낸 건 '출고', [이관]으로 보낸 건 '●이관'."""
     return "●이관" if is_transfer(remarks) else "출고"
@@ -845,7 +853,12 @@ class SteelYardSheetDB:
         df = df[df["상태"] == "PENDING_DISPATCH"].copy().rename(columns={"위치": "적재위치"})
         if df.empty:
             return pd.DataFrame(columns=cols)
-        return df[cols].sort_values("품번").reset_index(drop=True)
+        # 1순위: 북침 → 북야 → 남침 → 남야 → (대주·이관은 맨 끝)  2순위: 종류(가나다·알파벳)  3순위: 품번
+        out = df[cols].copy()
+        out["_dest_key"] = out["특기사항"].map(pending_dest_order)
+        out["_cat_key"] = out["종류"].map(category_sort_key)
+        out = out.sort_values(["_dest_key", "_cat_key", "품번"])
+        return out.drop(columns=["_dest_key", "_cat_key"]).reset_index(drop=True)
 
     def search_dispatched(self, category_name="전체", part_kw="", start_date=None, end_date=None):
         df = self._items_df()
