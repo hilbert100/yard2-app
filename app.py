@@ -80,8 +80,24 @@ SHIFT_ON_OCCUPIED = True
 # 특기사항 맨 앞 표시: [이관]으로 보낸 품목 → "대주", [출고]로 보낸 품목 → "삼성"
 MARK_TRANSFER = "대주"
 MARK_OUTBOUND = "삼성"
+# 재고현황 [출고] 풀다운 선택지 → 특기사항에 "삼성(북침)" 처럼 표시
+OUTBOUND_ZONES = ["북침", "북야", "남침", "남야"]
+OUTBOUND_ZONE_MARKS = tuple(f"{MARK_OUTBOUND}({z})" for z in OUTBOUND_ZONES)
 _OLD_TRANSFER_MARKS = ("★이관", "●대주")  # 예전 이관 표시(정리용)
-_ALL_MARKS = _OLD_TRANSFER_MARKS + (MARK_TRANSFER, MARK_OUTBOUND)
+_ALL_MARKS = _OLD_TRANSFER_MARKS + OUTBOUND_ZONE_MARKS + (MARK_TRANSFER, MARK_OUTBOUND)
+
+
+def outbound_mark_for(zone):
+    return f"{MARK_OUTBOUND}({zone})" if zone in OUTBOUND_ZONES else MARK_OUTBOUND
+
+
+def outbound_mark_of(remarks):
+    """특기사항에 이미 붙은 출고 표시(삼성(북침) 등)를 그대로 돌려줌. 없으면 '삼성'."""
+    r = str(remarks or "").strip()
+    for m in OUTBOUND_ZONE_MARKS:
+        if r == m or r.startswith(m + " /") or r.startswith(m + "/"):
+            return m
+    return MARK_OUTBOUND
 
 
 def strip_marks(remarks):
@@ -571,13 +587,14 @@ class SteelYardSheetDB:
         _bump_cache_version()
 
     # ---------------- 2단계: 재고현황 체크 -> 출고예정(PENDING_DISPATCH) ----------------
-    def move_to_pending_dispatch(self, part_numbers):
+    def move_to_pending_dispatch(self, part_numbers, marks=None):
         """출고 처리: 특기사항 맨 앞에 '삼성' 표시를 붙이고 출고예정내역으로 이동."""
         for p in part_numbers:
             row_idx = self._find_item_row(p)
             if row_idx:
                 current_remarks = self.ws_items.cell(row_idx, ITEMS_COL["특기사항"]).value or ""
-                self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], add_mark(current_remarks, MARK_OUTBOUND))
+                mark = (marks or {}).get(p, MARK_OUTBOUND)  # 예: 삼성(북침)
+                self.ws_items.update_cell(row_idx, ITEMS_COL["특기사항"], add_mark(current_remarks, mark))
                 self.ws_items.update_cell(row_idx, ITEMS_COL["상태"], "PENDING_DISPATCH")
         _bump_cache_version()
 
@@ -603,7 +620,7 @@ class SteelYardSheetDB:
 
         existing_remarks = row_vals[ITEMS_COL["특기사항"] - 1]
         if mark is None:
-            mark = MARK_TRANSFER if is_transfer(existing_remarks) else MARK_OUTBOUND
+            mark = MARK_TRANSFER if is_transfer(existing_remarks) else outbound_mark_of(existing_remarks)
         existing_remarks = add_mark(existing_remarks, mark)
         final_remarks = existing_remarks
         if remarks:
@@ -1439,7 +1456,7 @@ with tab_stock:
 
 
             stock_df_display = stock_df.reset_index(drop=True).copy()
-            stock_df_display["출고 선택"] = False
+            stock_df_display["출고 선택"] = None  # 북침/북야/남침/남야 중 고르면 출고
             stock_df_display["이관 체크"] = False
             stock_df_display["삭제 체크"] = False
 
@@ -1463,7 +1480,7 @@ with tab_stock:
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
                         "특기사항": st.column_config.TextColumn("특기사항", width="small"),
-                        "출고 선택": st.column_config.CheckboxColumn("출고", width="small", default=False),
+                        "출고 선택": st.column_config.SelectboxColumn("출고", width="small", options=OUTBOUND_ZONES),
                         "이관 체크": st.column_config.CheckboxColumn("이관", width="small", default=False),
                         "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                     },
@@ -1515,7 +1532,12 @@ with tab_stock:
 
                 if do_confirm:
                     # [확정] 하나로: 출고 체크 → 출고, 이관 체크 → 이관으로 [출고/이관예정내역]에 보냄
-                    out_parts = _checked("출고 선택")
+                    out_marks = {}
+                    for i in range(len(edited_df)):
+                        z = edited_df.loc[i, "출고 선택"]
+                        if isinstance(z, str) and z in OUTBOUND_ZONES:
+                            out_marks[current_part[i]] = outbound_mark_for(z)
+                    out_parts = list(out_marks)
                     tr_parts = _checked("이관 체크")
                     both = [p for p in out_parts if p in tr_parts]
                     out_parts = [p for p in out_parts if p not in both]
@@ -1523,8 +1545,10 @@ with tab_stock:
                     if both:
                         add_flash("stock", "warning", f"출고와 이관이 둘 다 체크되어 처리하지 않았습니다: {', '.join(both)}")
                     if out_parts:
-                        db.move_to_pending_dispatch(out_parts)
-                        add_flash("stock", "success", f"🚚 출고 {len(out_parts)}건 → [출고/이관예정내역] 이동: {', '.join(out_parts)}")
+                        db.move_to_pending_dispatch(out_parts, marks=out_marks)
+                        add_flash("stock", "success",
+                                  f"🚚 출고 {len(out_parts)}건 → [출고/이관예정내역] 이동: "
+                                  + ", ".join(f"{p}({out_marks[p]})" for p in out_parts))
                     if tr_parts:
                         db.transfer_to_pending(tr_parts)
                         add_flash("stock", "success", f"🔁 이관 {len(tr_parts)}건 → [출고/이관예정내역] 이동: {', '.join(tr_parts)}")
@@ -1718,7 +1742,7 @@ with tab_assign:
                     confirm_success = []
                     for _, row in confirm_rows.iterrows():
                         try:
-                            mark = MARK_TRANSFER if row["구분"] == "●이관" else MARK_OUTBOUND
+                            mark = MARK_TRANSFER if row["구분"] == "●이관" else outbound_mark_of(row["특기사항"])
                             db.confirm_outbound(row["품번"], today, mark, "", mark=mark)
                             confirm_success.append(row["품번"])
                         except Exception as e:
