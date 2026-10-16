@@ -1497,6 +1497,7 @@ with tab_stock:
                         "이관 체크": st.column_config.CheckboxColumn("이관", width="small", default=False),
                         "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                     },
+                    column_order=["종류", "품번", "적재위치", "출고 선택", "이관 체크", "삭제 체크", "규격", "입고일", "특기사항"],
                     key=editor_key("stock"),
                 )
 
@@ -1587,7 +1588,7 @@ with tab_stock:
                 next_editor("stock")  # 체크/수정 흔적 초기화
                 st.rerun()
         else:
-            render_html_table(stock_df)
+            render_html_table(stock_df[["종류", "품번", "적재위치", "입고일", "규격", "특기사항"]])
     else:
         st.info("조건에 일치하는 재고가 없습니다.")
 
@@ -1628,7 +1629,7 @@ with tab_pending:
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
-                    column_order=["종류", "품번", "적재위치", "구분", "특기사항", "배차정보", "보류 체크", "확정 체크"],
+                    column_order=["종류", "품번", "적재위치", "구분", "특기사항", "배차정보", "확정 체크", "보류 체크"],
                     key=editor_key("pending"),
                 )
                 do_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
@@ -1703,7 +1704,7 @@ with tab_assign:
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
-                    column_order=["배차정보", "종류", "품번", "구분", "특기사항", "보류 체크", "확정 체크"],
+                    column_order=["배차정보", "종류", "품번", "구분", "특기사항", "확정 체크", "보류 체크"],
                     key=editor_key("assign"),
                 )
                 do_assign_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
