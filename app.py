@@ -9,6 +9,11 @@ import gspread
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:  # 브라우저 쿠키를 새로고침 없이 읽기 위한 부품 (requirements.txt: streamlit-js-eval)
+    from streamlit_js_eval import streamlit_js_eval
+except Exception:
+    streamlit_js_eval = None
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -1196,6 +1201,8 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = _ok
     if not _ok and not _qp_token:
         st.session_state["_admin_cookie_probe"] = True
+if "role_radio" not in st.session_state:
+    st.session_state["role_radio"] = "관리자" if st.session_state.is_admin else "이용자 (조회만)"
 
 # 로그인/로그아웃 직후 쿠키 저장·삭제
 _cookie_action = st.session_state.pop("_admin_cookie_action", None)
@@ -1203,14 +1210,28 @@ if _cookie_action == "set":
     write_admin_cookie(make_admin_token(), ADMIN_COOKIE_DAYS * 86400)
 elif _cookie_action == "clear":
     write_admin_cookie("", 0)
-if st.session_state.pop("_admin_cookie_probe", False):
-    probe_admin_cookie()
+if st.session_state.get("_admin_cookie_probe"):
+    if streamlit_js_eval is not None:
+        # 새로고침 없이 브라우저 쿠키를 읽어옴 (처음엔 None, 값이 오면 한 번 더 실행됨)
+        _ck = streamlit_js_eval(js_expressions="document.cookie", key="_admin_cookie_read")
+        if _ck is not None:
+            st.session_state.pop("_admin_cookie_probe", None)
+            _m = re.search(r"(?:^|; )" + ADMIN_COOKIE_NAME + r"=([^;]+)", str(_ck))
+            if _m and is_valid_admin_token(_m.group(1)):
+                st.session_state.is_admin = True
+                st.session_state["role_radio"] = "관리자"
+                st.rerun()
+            elif _m:
+                write_admin_cookie("", 0)  # 만료·무효 출입증 삭제
+    else:
+        # 부품이 없으면 예전 방식(주소에 붙여 한 번 다시 열기)
+        st.session_state.pop("_admin_cookie_probe", None)
+        probe_admin_cookie()
 
 with st.container(border=True):
     c_role, c_pin = st.columns([2, 3])
     role_selection = c_role.radio(
-        "사용자 권한", ["이용자 (조회만)", "관리자"], horizontal=True,
-        index=1 if st.session_state.is_admin else 0,
+        "사용자 권한", ["이용자 (조회만)", "관리자"], horizontal=True, key="role_radio",
     )
 
     if role_selection == "관리자":
