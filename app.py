@@ -898,6 +898,9 @@ class SteelYardSheetDB:
 # ---------------------------------------------------------
 # 엑셀 다운로드 생성기
 # ---------------------------------------------------------
+LEFT_ALIGN_COLS = {"특기사항"}  # 글자 길이가 제각각이라 앞(왼쪽) 정렬하는 칸
+
+
 def render_html_table(df, checkbox_col=None):
     """조회 전용 화면(이용자)에서 쓰는, 목업과 같은 스타일의 컴팩트한 표."""
     if df.empty:
@@ -912,7 +915,8 @@ def render_html_table(df, checkbox_col=None):
     for _, row in df.iterrows():
         cells = "".join(
             f'<td style="padding:6px 8px;border-bottom:0.5px solid var(--border);'
-            f'white-space:nowrap;text-align:center;">{row[c] if str(row[c]).strip() else "-"}</td>'
+            f'white-space:nowrap;text-align:{"left" if c in LEFT_ALIGN_COLS else "center"};">'
+            f'{row[c] if str(row[c]).strip() else "-"}</td>'
             for c in cols
         )
         rows_html += f"<tr>{cells}</tr>"
@@ -1513,7 +1517,7 @@ with tab_stock:
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                        "특기사항": st.column_config.TextColumn("특기사항", width="small"),
+                        "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "출고 선택": st.column_config.SelectboxColumn("출고", width="small", options=OUTBOUND_ZONES),
                         "이관 체크": st.column_config.CheckboxColumn("이관", width="small", default=False),
                         "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
@@ -1645,7 +1649,7 @@ with tab_pending:
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
-                        "특기사항": st.column_config.TextColumn("특기사항", width="small"),
+                        "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "배차정보": st.column_config.TextColumn("배차정보", width="small", max_chars=4),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
@@ -1721,7 +1725,7 @@ with tab_assign:
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
-                        "특기사항": st.column_config.TextColumn("특기사항", width="small"),
+                        "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
@@ -1840,6 +1844,7 @@ with tab_history:
                     hide_index=True,
                     disabled=["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항", "배차정보"],
                     column_config={
+                        "특기사항": st.column_config.TextColumn("특기사항", alignment="left"),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                     },
