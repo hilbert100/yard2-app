@@ -43,10 +43,14 @@ st.set_page_config(
 #    재고현황(IN_STOCK) / 출고예정내역(PENDING_DISPATCH) / 배차확정(DISPATCH_ASSIGNED) / 출고내역(DISPATCHED)
 #    화면에 나눠서 보여줍니다. 품번은 전체 시스템에서 영구히 유일합니다.
 # ---------------------------------------------------------
-ITEMS_HEADERS = ["품번", "종류", "규격", "위치", "상태", "입고일", "출고일", "배송지", "특기사항", "배차정보"]
+ITEMS_HEADERS = ["품번", "종류", "규격", "위치", "상태", "입고일", "출고일", "배송지", "특기사항", "배차정보", "P6"]
 ITEMS_COL = {name: i + 1 for i, name in enumerate(ITEMS_HEADERS)}  # 1-based 열 번호
 
-LOG_HEADERS = ["품번", "종류", "규격", "위치", "입고일", "출고일", "배송지", "특기사항", "기록시각", "배차정보"]
+LOG_HEADERS = ["품번", "종류", "규격", "위치", "입고일", "출고일", "배송지", "특기사항", "기록시각", "배차정보", "P6"]
+
+# P6 제품 구분: 입고 때 체크하면 Items 시트 'P6' 열에 "P6"로 저장.
+# 출고·이관·배차·보류 등 어떤 단계에서도 이 열은 건드리지 않으므로 끝까지 따라다님.
+P6_MARK = "P6"
 CATEGORIES_HEADERS = ["종류"]
 DESTINATIONS_HEADERS = ["배송지"]
 
@@ -445,6 +449,7 @@ class SteelYardSheetDB:
                 df[col] = ""
         df = df[ITEMS_HEADERS].astype(str).replace("nan", "")
         df["배차정보"] = df["배차정보"].map(lambda v: v.zfill(4) if v.isdigit() and len(v) < 4 else v)
+        df["P6"] = df["P6"].map(lambda v: P6_MARK if str(v).strip().upper() in ("P6", "Y", "TRUE", "O") else "")
         return df
 
     def _find_item_row(self, part_no):
@@ -492,7 +497,7 @@ class SteelYardSheetDB:
         return shifts
 
     # ---------------- 1단계: 입고 -> 재고현황(IN_STOCK) ----------------
-    def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks, level=""):
+    def register_inbound(self, part_no, category_name, spec, zone, row, col, inbound_date, remarks, level="", p6=False):
         clean_part_no = normalize_part_no(part_no, category_name)
         loc_code = format_location_code(zone, row, col, level)
 
@@ -519,7 +524,7 @@ class SteelYardSheetDB:
         clean_remarks = strip_stray_quotes(remarks) if remarks else ""
         self.ws_items.append_row([
             clean_part_no, category_name, clean_spec, loc_code, "IN_STOCK",
-            str(inbound_date), "", "", clean_remarks
+            str(inbound_date), "", "", clean_remarks, "", P6_MARK if p6 else ""
         ])
         _bump_cache_version()
 
@@ -659,6 +664,7 @@ class SteelYardSheetDB:
             final_remarks,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             row_vals[ITEMS_COL["배차정보"] - 1],
+            row_vals[ITEMS_COL["P6"] - 1],
         ])
         _bump_cache_version()
 
@@ -810,9 +816,9 @@ class SteelYardSheetDB:
         _bump_cache_version()
 
     # ---------------- 조회 ----------------
-    def search_current_stock(self, category_name="전체", part_kw="", spec_kw="", start_date=None, end_date=None):
+    def search_current_stock(self, category_name="전체", part_kw="", spec_kw="", start_date=None, end_date=None, p6_only=False):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항"]
+        cols = ["종류", "품번", "규격", "적재위치", "입고일", "P6", "특기사항"]
         if df.empty:
             return pd.DataFrame(columns=cols)
 
@@ -823,6 +829,8 @@ class SteelYardSheetDB:
             df = df[df["품번"].str.contains(part_kw.strip().upper(), na=False, regex=False)]
         if spec_kw:
             df = df[df["규격"].str.contains(spec_kw.strip().upper(), na=False, regex=False)]
+        if p6_only:
+            df = df[df["P6"] == P6_MARK]
         if (start_date or end_date) and not df.empty:
             parsed = pd.to_datetime(df["입고일"], errors="coerce")
             if start_date:
@@ -839,7 +847,7 @@ class SteelYardSheetDB:
     def search_assigned(self):
         """배차확정 대기: 같은 배차정보(차량)끼리 모이도록 배차정보 → 종류(가나다·알파벳) → 품번 순."""
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "배차정보"]
+        cols = ["종류", "품번", "규격", "적재위치", "입고일", "P6", "특기사항", "배차정보"]
         if df.empty:
             return pd.DataFrame(columns=cols)
         df = df[df["상태"] == "DISPATCH_ASSIGNED"].copy().rename(columns={"위치": "적재위치"})
@@ -852,7 +860,7 @@ class SteelYardSheetDB:
 
     def search_pending_dispatch(self):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "배차정보"]
+        cols = ["종류", "품번", "규격", "적재위치", "입고일", "P6", "특기사항", "배차정보"]
         if df.empty:
             return pd.DataFrame(columns=cols)
         df = df[df["상태"] == "PENDING_DISPATCH"].copy().rename(columns={"위치": "적재위치"})
@@ -867,7 +875,7 @@ class SteelYardSheetDB:
 
     def search_dispatched(self, category_name="전체", part_kw="", start_date=None, end_date=None):
         df = self._items_df()
-        cols = ["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항", "배차정보"]
+        cols = ["종류", "품번", "규격", "입고일", "출고일", "배송지", "P6", "특기사항", "배차정보"]
         if df.empty:
             return pd.DataFrame(columns=cols)
         df = df[df["상태"] == "DISPATCHED"].copy()
@@ -1271,7 +1279,7 @@ with tab_in:
     else:
         st.subheader("📥 현장 즉시 입고 등록")
         with st.form("realtime_in_form", clear_on_submit=True):
-            col_cat, col_part, col_spec, col_loc, col_date, col_rem = st.columns([1.5, 2.5, 2, 1.8, 1.5, 2])
+            col_cat, col_part, col_loc, col_p6, col_spec, col_date, col_rem = st.columns([1.5, 2.5, 1.8, 0.8, 2, 1.5, 2])
 
             categories = db.get_categories()
             if not categories:
@@ -1289,9 +1297,6 @@ with tab_in:
                              "단, R칼럼은 F가 붙지 않고 끝에 상/하를 붙일 수 있습니다: r1 2a 003 상 → R1-2A-003-상",
                     )
 
-                with col_spec:
-                    spec = st.text_input("규격", placeholder="예: 12T x 1500 x 6000")
-
                 with col_loc:
                     loc_raw = st.text_input(
                         "적재위치",
@@ -1299,6 +1304,13 @@ with tab_in:
                         help="구역+열 2자리+행 2자리로 붙여 쓰면 됩니다. a0307 → A-03-07. "
                              "2단 적재는 뒤에 상/하 (예: a0307상)",
                     )
+
+                with col_p6:
+                    st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+                    is_p6 = st.checkbox("P6")
+
+                with col_spec:
+                    spec = st.text_input("규격", placeholder="예: 12T x 1500 x 6000")
 
                 with col_date:
                     in_date = st.date_input("입고일", datetime.now())
@@ -1318,11 +1330,13 @@ with tab_in:
                     else:
                         zone, row_n, col_n, level = loc_parts
                         try:
-                            db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks, level)
+                            db.register_inbound(full_part_no, cat_name, spec, zone, row_n, col_n, in_date, remarks, level,
+                                                p6=is_p6)
                             saved_loc = format_location_code(zone, row_n, col_n, level)
                             # rerun 후에도 결과가 보이도록 저장해 두었다가 아래에서 표시
                             st.session_state["_inbound_msg"] = (
-                                f"✅ [{full_part_no}] 입고 등록 완료! (위치: {saved_loc})" + shift_note(db.last_shifts)
+                                f"✅ [{full_part_no}]{' (P6)' if is_p6 else ''} 입고 등록 완료! (위치: {saved_loc})"
+                                + shift_note(db.last_shifts)
                             )
                             st.rerun()
                         except Exception as e:
@@ -1446,20 +1460,23 @@ with tab_stock:
     show_flash("stock")
 
     st.markdown("##### 🎯 조건별 검색")
-    sf_col1, sf_col2, sf_col3 = st.columns([1.5, 2, 2])
+    sf_col1, sf_col2, sf_col3 = st.columns([1.5, 2, 0.8])
 
     cat_list = ["전체"] + db.get_categories()
     sel_cat = select_nokb(sf_col1, "● 종류 선택", cat_list)
     sel_part = sf_col2.text_input("● 품번 검색", placeholder="예: FA-3B 또는 01")
-    sel_spec = sf_col3.text_input("● 규격 검색", placeholder="예: 12T 또는 1500")
+    with sf_col3:
+        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+        sel_p6 = st.checkbox("P6", key="stock_p6_filter", help="체크하면 P6 제품만 보여줍니다.")
 
-    sf_col4, sf_col5 = st.columns(2)
+    sf_col4, sf_col5, sf_col6 = st.columns([1, 1, 1.5])
     stock_start_date = sf_col4.date_input("● 입고일 시작", value=None, key="stock_start_date")
     stock_end_date = sf_col5.date_input("● 입고일 종료", value=None, key="stock_end_date")
+    sel_spec = sf_col6.text_input("● 규격 검색", placeholder="예: 12T 또는 1500")
 
     stock_df = db.search_current_stock(
         category_name=sel_cat, part_kw=sel_part, spec_kw=sel_spec,
-        start_date=stock_start_date, end_date=stock_end_date,
+        start_date=stock_start_date, end_date=stock_end_date, p6_only=sel_p6,
     )
     st.metric("조회된 재고 수량", f"{len(stock_df)}건")
 
@@ -1510,19 +1527,20 @@ with tab_stock:
                     stock_df_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["입고일"],
+                    disabled=["입고일", "P6"],
                     column_config={
                         "종류": st.column_config.SelectboxColumn("종류", width="small", options=cat_options),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
+                        "P6": st.column_config.TextColumn("P6", width="small"),
                         "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "출고 선택": st.column_config.SelectboxColumn("출고", width="small", options=OUTBOUND_ZONES),
                         "이관 체크": st.column_config.CheckboxColumn("이관", width="small", default=False),
                         "삭제 체크": st.column_config.CheckboxColumn("삭제", width="small", default=False),
                     },
-                    column_order=["종류", "품번", "적재위치", "출고 선택", "이관 체크", "삭제 체크", "규격", "입고일", "특기사항"],
+                    column_order=["종류", "품번", "적재위치", "출고 선택", "이관 체크", "삭제 체크", "규격", "입고일", "P6", "특기사항"],
                     key=editor_key("stock"),
                 )
 
@@ -1613,7 +1631,7 @@ with tab_stock:
                 next_editor("stock")  # 체크/수정 흔적 초기화
                 st.rerun()
         else:
-            render_html_table(stock_df[["종류", "품번", "적재위치", "입고일", "규격", "특기사항"]])
+            render_html_table(stock_df[["종류", "품번", "적재위치", "입고일", "규격", "P6", "특기사항"]])
     else:
         st.info("조건에 일치하는 재고가 없습니다.")
 
@@ -1630,7 +1648,7 @@ with tab_pending:
         pending_df["구분"] = pending_df["특기사항"].map(gubun_of)
         if not is_admin:
             render_html_table(
-                pending_df[["종류", "품번", "적재위치", "구분", "특기사항", "배차정보"]].rename(columns={"적재위치": "위치"})
+                pending_df[["종류", "품번", "적재위치", "구분", "P6", "특기사항", "배차정보"]].rename(columns={"적재위치": "위치"})
             )
         else:
 
@@ -1643,18 +1661,19 @@ with tab_pending:
                     pending_df_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "구분"],
+                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "P6", "특기사항", "구분"],
                     column_config={
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
+                        "P6": st.column_config.TextColumn("P6", width="small"),
                         "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "배차정보": st.column_config.TextColumn("배차정보", width="small", max_chars=4),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
-                    column_order=["종류", "품번", "적재위치", "구분", "특기사항", "배차정보", "확정 체크", "보류 체크"],
+                    column_order=["종류", "품번", "적재위치", "구분", "P6", "특기사항", "배차정보", "확정 체크", "보류 체크"],
                     key=editor_key("pending"),
                 )
                 do_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
@@ -1707,7 +1726,7 @@ with tab_assign:
         assign_df = assign_df.copy()
         assign_df["구분"] = assign_df["특기사항"].map(gubun_of)
         if not is_admin:
-            render_html_table(assign_df[["배차정보", "종류", "품번", "구분", "특기사항"]])
+            render_html_table(assign_df[["배차정보", "종류", "품번", "구분", "P6", "특기사항"]])
         else:
 
             assign_display = assign_df.reset_index(drop=True).copy()
@@ -1719,17 +1738,18 @@ with tab_assign:
                     assign_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "특기사항", "구분"],
+                    disabled=["종류", "품번", "규격", "적재위치", "입고일", "P6", "특기사항", "구분"],
                     column_config={
                         "배차정보": st.column_config.TextColumn("배차정보", width="small", max_chars=4),
                         "종류": st.column_config.TextColumn("종류", width="small"),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "구분": st.column_config.TextColumn("구분", width="small"),
+                        "P6": st.column_config.TextColumn("P6", width="small"),
                         "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
                         "확정 체크": st.column_config.CheckboxColumn("확정", width="small", default=False),
                     },
-                    column_order=["배차정보", "종류", "품번", "구분", "특기사항", "확정 체크", "보류 체크"],
+                    column_order=["배차정보", "종류", "품번", "구분", "P6", "특기사항", "확정 체크", "보류 체크"],
                     key=editor_key("assign"),
                 )
                 do_assign_apply = st.form_submit_button("⚡ 적용", type="primary", use_container_width=True)
@@ -1842,7 +1862,7 @@ with tab_history:
                     dispatched_df_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["종류", "품번", "규격", "입고일", "출고일", "배송지", "특기사항", "배차정보"],
+                    disabled=["종류", "품번", "규격", "입고일", "출고일", "배송지", "P6", "특기사항", "배차정보"],
                     column_config={
                         "특기사항": st.column_config.TextColumn("특기사항", alignment="left"),
                         "보류 체크": st.column_config.CheckboxColumn("보류", width="small", default=False),
