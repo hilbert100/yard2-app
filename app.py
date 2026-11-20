@@ -728,6 +728,14 @@ class SteelYardSheetDB:
         _bump_cache_version()
 
     # ---------------- 재고현황 표에서 셀 직접 수정 ----------------
+    def set_p6(self, part_no, flag):
+        """재고현황 표에서 P6 표시를 켜고 끔 (Items 시트 'P6' 열만 수정)."""
+        row_idx = self._find_item_row(part_no)
+        if not row_idx:
+            raise ValueError(f"[{part_no}] 품번을 찾을 수 없습니다.")
+        self.ws_items.update_cell(row_idx, ITEMS_COL["P6"], P6_MARK if flag else "")
+        _bump_cache_version()
+
     def update_item(self, original_part_no, new_part_no, category_name, spec, location_code, remarks):
         """재고현황 표에서 종류/품번/규격/위치/특기사항을 한 번에 수정."""
         row_idx = self._find_item_row(original_part_no)
@@ -1511,6 +1519,7 @@ with tab_stock:
 
 
             stock_df_display = stock_df.reset_index(drop=True).copy()
+            stock_df_display["P6"] = stock_df_display["P6"] == P6_MARK  # 체크박스로 표시 (누락분은 체크 후 💾 수정 저장)
             stock_df_display["출고 선택"] = None  # 북침/북야/남침/남야 중 고르면 출고
             stock_df_display["이관 체크"] = False
             stock_df_display["삭제 체크"] = False
@@ -1527,14 +1536,14 @@ with tab_stock:
                     stock_df_display,
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["입고일", "P6"],
+                    disabled=["입고일"],
                     column_config={
                         "종류": st.column_config.SelectboxColumn("종류", width="small", options=cat_options),
                         "품번": st.column_config.TextColumn("품번", width="medium"),
                         "규격": st.column_config.TextColumn("규격", width="small"),
                         "적재위치": st.column_config.TextColumn("위치", width="small"),
                         "입고일": st.column_config.DateColumn("입고일", width="small", format="MM/DD"),
-                        "P6": st.column_config.TextColumn("P6", width="small"),
+                        "P6": st.column_config.CheckboxColumn("P6", width="small", default=False),
                         "특기사항": st.column_config.TextColumn("특기사항", width="medium", alignment="left"),
                         "출고 선택": st.column_config.SelectboxColumn("출고", width="small", options=OUTBOUND_ZONES),
                         "이관 체크": st.column_config.CheckboxColumn("이관", width="small", default=False),
@@ -1578,6 +1587,28 @@ with tab_stock:
                         )
                     except Exception as e:
                         errors.append(f"[{orig['품번']}] {e}")
+                # P6 체크를 바꾼 줄 저장 (품번을 같이 고쳤다면 고친 품번으로)
+                failed_parts = {e.split("]")[0].lstrip("[") for e in errors}
+                p6_on, p6_off = [], []
+                for idx_str, changes in edited_rows.items():
+                    if "P6" not in changes:
+                        continue
+                    idx = int(idx_str)
+                    if stock_df_display.loc[idx, "품번"] in failed_parts:
+                        continue
+                    flag = bool(changes["P6"])
+                    if flag == bool(stock_df_display.loc[idx, "P6"]):
+                        continue
+                    try:
+                        db.set_p6(current_part[idx], flag)
+                        (p6_on if flag else p6_off).append(current_part[idx])
+                    except Exception as e:
+                        errors.append(f"[{current_part[idx]}] {e}")
+                if p6_on:
+                    saved.append("P6 표시: " + ", ".join(p6_on))
+                if p6_off:
+                    saved.append("P6 해제: " + ", ".join(p6_off))
+
                 if saved:
                     add_flash("stock", "success", f"💾 수정 저장됨: {', '.join(saved)}")
                 for err in errors:
